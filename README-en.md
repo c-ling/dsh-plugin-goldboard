@@ -25,23 +25,23 @@ Then add this row to `~/.dsh/profiles/web/cordis.patch.yml`:
 
 Restart `dsh web`, then hard-refresh the page.
 
-### GitHub install after release (replace `<owner>/<repo>` when publishing)
+### GitHub install after release 
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 Or with an existing `dsh` binary:
 
 ```sh
-dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 When `pnpm` is not on `PATH`:
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:<owner>/<repo>#v1.0.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 > `dsh plugin` forwards its arguments to pnpm (pnpm 9+, `git` required). The warning
@@ -77,9 +77,9 @@ It should return `{ ok: true, quotes: { AU9999, XAU, USDCNY }, plan: … }`.
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
-# or: npx @deepseek-ai/dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
-# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:<owner>/<repo>#v1.0.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 Re-running the install command with the new `#v<version>` pin upgrades the dependency;

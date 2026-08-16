@@ -25,23 +25,23 @@ corepack pnpm add "link:/绝对路径/dsh-plugin-goldboard"
 
 重启 `dsh web`，然后硬刷新页面。
 
-### 发布后从 GitHub 安装（发布时替换 `<owner>/<repo>`）
+### 发布后从 GitHub 安装
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 或：
 
 ```sh
-dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 当 `pnpm` 不在 `PATH` 时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:<owner>/<repo>#v1.0.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 > `dsh plugin` 会转发参数给 pnpm（pnpm 9+，需要 `git`）。警告
@@ -76,9 +76,9 @@ curl -s http://127.0.0.1:3080/dsh-plugin-goldboard/snapshot
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:<owner>/<repo>#v1.0.0"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:<owner>/<repo>#v1.0.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
 重新执行安装命令并换新的 `#v<version>` 即升级；`cordis.patch.yml` 的 loader row 保持不变。
