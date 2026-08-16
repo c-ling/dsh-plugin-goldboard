@@ -1,54 +1,40 @@
-[English](README-en.md)
-
 # dsh-plugin-goldboard
 
 DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起为小圆球），显示上金所 Au99.99、伦敦现货金 XAU 与 USDCNY，按固定价差估算招商银行积存金价格；结合持仓/上限与手续费（默认买入 0 + 卖出 5 元/克）给出日内买卖参考与建议委托单，并通过宿主机系统通知和 Webhook 在阈值穿越时提醒。
 
+[English](README-en.md)
+
+[![dsh-plugin topic](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+
 > 本插件只提供技术面参考，不自动下单，不构成投资建议。
 
-## Install
+## 安装
 
-### 本地开发安装
-
-```sh
-cd ~/.dsh/profiles/web
-corepack pnpm add "link:/绝对路径/dsh-plugin-goldboard"
-```
-
-然后向 `~/.dsh/profiles/web/cordis.patch.yml` 增加：
-
-```yaml
-- insert:
-    - id: dsh-plugin-goldboard
-      name: 'dsh-plugin-goldboard'
-```
-
-重启 `dsh web`，然后硬刷新页面。
-
-### 发布后从 GitHub 安装
+从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
 npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
-或：
+或使用已有的 `dsh` 命令：
 
 ```sh
 dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
-当 `pnpm` 不在 `PATH` 时：
+pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
 corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
-> `dsh plugin` 会转发参数给 pnpm（pnpm 9+，需要 `git`）。警告
-> `declares no dsh.bundle — installed as a plain dependency` 是预期现象：本插件不是
-> profile bundle 层，而是由 loader row 激活。
+> `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
+> 安装时若看到 `declares no dsh.bundle — installed as a plain dependency` 的提示属正常现象：
+> 本插件不是 profile bundle 层，而是通过下面的 loader 行激活。
 
-再向 `~/.dsh/profiles/web/cordis.patch.yml` 增加：
+然后在 `~/.dsh/profiles/web/cordis.patch.yml` 增加一行插入：
 
 ```yaml
 - insert:
@@ -56,16 +42,16 @@ corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
       name: 'dsh-plugin-goldboard'
 ```
 
-重启 `dsh web`（client-modules 对包判定按进程永久缓存，新包需要宿主重启），然后硬刷新页面。
+重启 `dsh web`（client-modules 按进程缓存包裁决，新包必须重启宿主），然后硬刷新页面。
 右上角会出现黄金看板浮窗；设置页新增“黄金看板”。
 
-## Verify
+## 验证
 
 ```sh
 curl -s http://127.0.0.1:3080/plugins/dsh-plugin-goldboard/client.js | head -c 60
 ```
 
-应打印以 `window.__ModuleLoader__.load({` 开头的 factory bundle。
+应输出 `window.__ModuleLoader__.load({` 开头的 factory bundle。
 
 ```sh
 curl -s http://127.0.0.1:3080/dsh-plugin-goldboard/snapshot
@@ -73,7 +59,7 @@ curl -s http://127.0.0.1:3080/dsh-plugin-goldboard/snapshot
 
 应返回 `{ ok: true, quotes: { AU9999, XAU, USDCNY }, plan: … }`。
 
-## Update
+## 更新
 
 ```sh
 dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
@@ -81,10 +67,10 @@ dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 # 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
-重新执行安装命令并换新的 `#v<version>` 即升级；`cordis.patch.yml` 的 loader row 保持不变。
+用新的 `#v1.0.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
-## Uninstall
+## 卸载
 
 ```sh
 cd ~/.dsh/profiles/web
@@ -92,7 +78,7 @@ corepack pnpm remove dsh-plugin-goldboard
 # 或：dsh plugin --profile web remove dsh-plugin-goldboard
 ```
 
-同时删除 `cordis.patch.yml` 中对应的 `insert` row，然后重启 `dsh web`。
+同时删除 `cordis.patch.yml` 中对应的 `insert` 行，然后重启 `dsh web`。
 本插件会保存状态，数据位于 `$DSH_HOME/storages/dsh-plugin-goldboard/`，卸载后需手动清理。
 
 ## 功能
@@ -104,7 +90,7 @@ corepack pnpm remove dsh-plugin-goldboard
 - 回本价与建议委托单：买入 0 + 卖出 5 元/克默认，一键复制手动去招行 App 下单。
 - 提醒：宿主机系统通知（macOS/Linux/Windows）+ 飞书/钉钉/企业微信/通用 Webhook；无冷却、无勿扰，交易时段内每次阈值穿越都提醒。
 - 交易时段：工作日 09:00–次日 02:00，节假日可编辑。
-- 中英文 UI，跟随 `Settings → General → Language`；明暗主题使用 DSW token。
+- 中英文 UI，跟随「设置 → 通用 → 语言」；明暗主题使用 DSW 设计变量。
 
 ## 数据源
 
@@ -121,3 +107,7 @@ corepack pnpm remove dsh-plugin-goldboard
 ## 免责声明
 
 本插件输出均为技术面参考，不构成投资建议。黄金价格波动可能导致亏损，请自行决策并核实招行 App 实际报价。
+
+## License
+
+[MIT](LICENSE)

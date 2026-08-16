@@ -1,31 +1,17 @@
-[中文](README.md)
-
 # dsh-plugin-goldboard
 
 A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right floating board (collapsible to a small orb) showing SGE Au99.99, London spot gold XAU and USDCNY, with China Merchants Bank 积存金 prices estimated from a configurable fixed spread. It uses your position/limits and fee model (default buy 0 + sell 5 CNY/g) to produce intraday buy/sell references and a copyable suggested order, and alerts on every threshold crossing via host system notifications and webhooks.
+
+[中文](README.md)
+
+[![dsh-plugin topic](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
+[![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 > This plugin provides technical references only. It never places orders and is not investment advice.
 
 ## Install
 
-### Local development install
-
-```sh
-cd ~/.dsh/profiles/web
-corepack pnpm add "link:/absolute/path/to/dsh-plugin-goldboard"
-```
-
-Then add this row to `~/.dsh/profiles/web/cordis.patch.yml`:
-
-```yaml
-- insert:
-    - id: dsh-plugin-goldboard
-      name: 'dsh-plugin-goldboard'
-```
-
-Restart `dsh web`, then hard-refresh the page.
-
-### GitHub install after release 
+Install into the web profile from GitHub (requires `pnpm` on `PATH`; otherwise use the corepack fallback below):
 
 ```sh
 npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
@@ -44,9 +30,7 @@ cd ~/.dsh/profiles/web
 corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
-> `dsh plugin` forwards its arguments to pnpm (pnpm 9+, `git` required). The warning
-> `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is
-> not a profile bundle layer; it is activated by the loader row below.
+> `dsh plugin` forwards its arguments to pnpm and fetches the package from this repo (pnpm 9+, `git` required). The warning `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is not a profile bundle layer; it is activated by the loader row below.
 
 Then add a loader row to `~/.dsh/profiles/web/cordis.patch.yml`:
 
@@ -56,9 +40,7 @@ Then add a loader row to `~/.dsh/profiles/web/cordis.patch.yml`:
       name: 'dsh-plugin-goldboard'
 ```
 
-Restart `dsh web` (client-modules caches package verdicts per process; new packages require a
-host restart), then hard-refresh the page. The gold board appears in the top-right corner and
-a "Gold Board" section is added to Settings.
+Restart `dsh web` (client-modules caches package verdicts per process; new packages require a host restart), then hard-refresh the page. The gold board appears in the top-right corner and a "Gold Board" section is added to Settings.
 
 ## Verify
 
@@ -82,8 +64,7 @@ dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 # or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
 ```
 
-Re-running the install command with the new `#v<version>` pin upgrades the dependency;
-the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
+Re-running the install command with the new `#v1.0.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
 
 ## Uninstall
 
@@ -94,8 +75,7 @@ corepack pnpm remove dsh-plugin-goldboard
 ```
 
 Also remove the matching `insert` row from `cordis.patch.yml`, then restart `dsh web`.
-This plugin keeps state under `$DSH_HOME/storages/dsh-plugin-goldboard/`, which is left for
-manual cleanup after uninstall.
+This plugin keeps state under `$DSH_HOME/storages/dsh-plugin-goldboard/`, which is left for manual cleanup after uninstall.
 
 ## Features
 
@@ -118,10 +98,12 @@ Free public, unofficial endpoints; they may rate-limit or change:
 - Au99.99 klines: Eastmoney `push2his.eastmoney.com`
 - XAU minute bars: built by the host from 30-second spot polls
 
-The plugin uses low-frequency polling, multi-source fallback and local caching; stale data is
-flagged on the board. Personal reference only; do not redistribute.
+The plugin uses low-frequency polling, multi-source fallback and local caching; stale data is flagged on the board. Personal reference only; do not redistribute.
 
 ## Disclaimer
 
-All output is a technical reference and does not constitute investment advice. Gold prices can
-move against you. Make your own decisions and always verify the actual price in the CMB app.
+All output is a technical reference and does not constitute investment advice. Gold prices can move against you. Make your own decisions and always verify the actual price in the CMB app.
+
+## License
+
+[MIT](LICENSE)
