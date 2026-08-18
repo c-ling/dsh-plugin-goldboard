@@ -1,6 +1,6 @@
 # dsh-plugin-goldboard
 
-DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起为小圆球），显示上金所 Au99.99、伦敦现货金 XAU 与 USDCNY，按固定价差估算招商银行积存金价格；结合持仓/上限与手续费（默认买入 0 + 卖出 5 元/克）给出日内买卖参考与建议委托单，并通过宿主机系统通知和 Webhook 在阈值穿越时提醒。
+DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起为小圆球），显示上金所 Au99.99、伦敦现货金 XAU 与 USDCNY，优先通过招商银行公开接口拉取积存金客户买卖价（接口不可用时回退为国际金价按汇率折算 + 固定价差估算）；结合持仓/上限与手续费（默认买入 0 + 卖出 5 元/克）给出日内买卖参考与建议委托单，并通过宿主机系统通知和 Webhook 在阈值穿越时提醒。
 
 [English](README-en.md)
 
@@ -14,20 +14,20 @@ DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起
 从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.1.0"
 ```
 
 或使用已有的 `dsh` 命令：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.1.0"
 ```
 
 pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.1.0"
 ```
 
 > `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
@@ -62,12 +62,12 @@ curl -s http://127.0.0.1:3080/dsh-plugin-goldboard/snapshot
 ## 更新
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.0.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.1.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.1.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.1.0"
 ```
 
-用新的 `#v1.0.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
+用新的 `#v1.1.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
 ## 卸载
@@ -85,9 +85,11 @@ corepack pnpm remove dsh-plugin-goldboard
 
 - 右上角浮窗（头部/底部均可拖拽，位置锚定窗口边缘并随窗口缩放自动修正），可收起为小圆球；10 秒刷新（页面隐藏时 60 秒），时间按北京时间展示。
 - Au99.99（元/克）、XAU（美元/盎司）、USDCNY、国际金价折算元/克与内外价差。
-- 招行积存金估算价：`Au99.99 + 可配置价差`（默认 +1.72 元/克，买卖可分别设）。
-- 日内信号：趋势过滤 + RSI/支撑触发买入；止盈、移动止盈、止损、日内了结、走弱减仓提醒。
-- 回本价与建议委托单：买入 0 + 卖出 5 元/克默认，一键复制手动去招行 App 下单。
+- 招行积存金价格：优先通过招行 `mbmodule-openapi.paas.cmbchina.com` 市场中心接口拉取实时客户买卖价（`zBuyPrc` / `zSelPrc`）；接口不可用时回退为 `国际金价按汇率折算 + 可配置价差`（默认 +1.72 元/克，买卖可分别设）。点击招行区域可查看自建的积存金折线图。
+- 建议区域优先以招行积存金实时数据为准；招行实时价不可用时，优先国际金价按汇率折算的兜底价，再回退 Au99.99（国内价 + 价差估算），不会直接失效。
+- 日内信号：买入信号参考 **5/10/30/60 分钟数据**——10/30/60 分钟 EMA20 一致向上做趋势过滤（10/30 分钟线由 5 分钟线重采样），5 分钟 RSI/支撑做入场时机；**每个时段内每分钟有效数据覆盖率必须 >80% 才给出建议**，任一时段数据有缺失时看板提示「当前数据有缺失，暂不给出建议」并展示各窗口覆盖率。**开盘后 1 小时内只校验 5/10 分钟窗口**（30/60 分钟窗口开盘初期天然不足）。止盈、移动止盈、止损、日内了结、走弱减仓提醒。策略按目标仓位区间（轻仓/标准/重仓）计算加减仓量，并加入同方向冷却、连续确认和信号强度显示。浮窗「当前建议」模块会展示 5/10/30/60 分钟 EMA20/RSI/SMA/布林/ATR/MACD 数值及判定依据；指标名称旁的 ? 悬浮可查看含义与计算公式。
+- 多笔持仓：可按每次买入的克数/价格分批记录，自动汇总总克数与平均成本；回调企稳时给出补仓建议，冲高回落/超买走弱时给出减仓建议；补仓/减仓按目标仓位区间计算，并保留最小底仓，避免小仓位被反复清仓。
+- 回本价与建议委托单：买入 0 + 卖出 5 元/克默认；即使使用招行实时价，回本价仍会加上买入/卖出手续费，可直接查看建议去招行 App 下单。
 - 提醒：宿主机系统通知（macOS/Linux/Windows）+ 飞书/钉钉/企业微信/通用 Webhook；无冷却、无勿扰，交易时段内每次阈值穿越都提醒。
 - 交易时段：工作日 09:00–次日 02:00，节假日可编辑。
 - 中英文 UI，跟随「设置 → 通用 → 语言」；明暗主题使用 DSW 设计变量。
@@ -96,11 +98,14 @@ corepack pnpm remove dsh-plugin-goldboard
 
 免费公开源，非官方接口，可能限流或变更：
 
-- Au99.99：新浪 `gds_AU9999`（主）/ 东财 `118.AU9999`（备）
-- XAU 现货：腾讯/新浪 `hf_XAU`
+- Au99.99：新浪 `gds_AU9999`（主）→ 上金所 SGE `graph/quotations` → 东财 `118.AU9999` → 60s API（备）
+- XAU 现货：腾讯/新浪 `hf_XAU` → gold-api.com → 60s API → GoldPrice.Today → Yahoo Finance（备）
 - USDCNY：腾讯 `whUSDCNY`
-- Au99.99 K 线：东财 `push2his.eastmoney.com`
-- XAU 分钟线：宿主以 30 秒现货报价自建
+- 招行积存金：`https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center`（POST `params=[{"prdType":"H","prdCode":""}]`）
+- 品牌金价/积存金（状态页展示）：金投网 `api.jijinhao.com`、京东金融 `api.jdjygold.com`
+- Au99.99 K 线：东财 `push2his.eastmoney.com`，历史可用上金所 `graph/Dailyhq` 兜底
+- XAU K 线：东财 `push2his.eastmoney.com`；日线历史可用 Yahoo Finance `query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d` 兜底
+- XAU / 招行积存金分钟线：宿主以轮询报价自建
 
 插件使用低频轮询、多源降级、本地缓存；看板标注数据是否过期。仅供个人参考，不用于分发。
 
