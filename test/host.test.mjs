@@ -1005,6 +1005,78 @@ test("plan engine still withholds suggestions in the first hour when 5/10m cover
   assert.equal(plan.suggestedOrder, null);
 });
 
+test("plan engine checks only 5/10m coverage during the daily 00:00-01:00 Beijing window", () => {
+  const now = new Date("2026-08-14T16:30:00Z"); // Saturday 00:30 Beijing, still Friday's session
+  const runtime = {
+    quotes: {
+      AU9999: { price: 950, bid: 949, ask: 951, source: "test", updatedAt: now.getTime() },
+      XAU: { price: 4375.8, source: "test", updatedAt: now.getTime() },
+      USDCNY: { price: 6.7421, source: "test", updatedAt: now.getTime() },
+    },
+    bars: {
+      AU9999: { 1: [], 5: [], 60: [] },
+      XAU: { 1: oneMinBars(now, 30), 5: [], 60: [] },
+      CMB: { 1: [], 5: [], 60: [] },
+    },
+  };
+  const plan = computePlan(runtime, DEFAULT_CONFIG, now);
+  // The 60m window is only 50% covered, but 30/60m are not validated during
+  // the daily 00:00-01:00 Beijing window; the plan proceeds (wait) instead of
+  // data_incomplete.
+  assert.equal(plan.action, "wait");
+  assert.ok(!plan.reasonCodes.some((code) => code.startsWith("data_incomplete")));
+  assert.equal(plan.dataCoverage[60], 0.5);
+  assert.equal(plan.dataCoverage[5], 1);
+});
+
+test("plan engine still withholds suggestions in 00:00-01:00 when 5/10m coverage fails", () => {
+  const now = new Date("2026-08-14T16:30:00Z"); // Saturday 00:30 Beijing
+  const end = Math.floor(now.getTime() / 60_000) * 60_000;
+  // Remove three minutes inside the last 10 (incl. two inside the last 5).
+  const sparse = oneMinBars(now, 30).filter((bar) =>
+    bar.t !== end - 2 * 60_000 && bar.t !== end - 4 * 60_000 && bar.t !== end - 6 * 60_000,
+  );
+  const runtime = {
+    quotes: {
+      AU9999: { price: 950, bid: 949, ask: 951, source: "test", updatedAt: now.getTime() },
+      XAU: { price: 4375.8, source: "test", updatedAt: now.getTime() },
+      USDCNY: { price: 6.7421, source: "test", updatedAt: now.getTime() },
+    },
+    bars: {
+      AU9999: { 1: [], 5: [], 60: [] },
+      XAU: { 1: sparse, 5: [], 60: [] },
+      CMB: { 1: [], 5: [], 60: [] },
+    },
+  };
+  const plan = computePlan(runtime, DEFAULT_CONFIG, now);
+  assert.equal(plan.action, "data_incomplete");
+  assert.ok(plan.reasonCodes.includes("data_incomplete_5m"));
+  assert.ok(plan.reasonCodes.includes("data_incomplete_10m"));
+  assert.ok(!plan.reasonCodes.includes("data_incomplete_30m"));
+  assert.ok(!plan.reasonCodes.includes("data_incomplete_60m"));
+  assert.equal(plan.suggestedOrder, null);
+});
+
+test("plan engine does not relax 30/60m coverage after 01:00 Beijing", () => {
+  const now = new Date("2026-08-14T17:00:00Z"); // Saturday 01:00 Beijing, still Friday's session
+  const runtime = {
+    quotes: {
+      AU9999: { price: 950, bid: 949, ask: 951, source: "test", updatedAt: now.getTime() },
+      XAU: { price: 4375.8, source: "test", updatedAt: now.getTime() },
+      USDCNY: { price: 6.7421, source: "test", updatedAt: now.getTime() },
+    },
+    bars: {
+      AU9999: { 1: [], 5: [], 60: [] },
+      XAU: { 1: oneMinBars(now, 30), 5: [], 60: [] },
+      CMB: { 1: [], 5: [], 60: [] },
+    },
+  };
+  const plan = computePlan(runtime, DEFAULT_CONFIG, now);
+  assert.equal(plan.action, "data_incomplete");
+  assert.ok(plan.reasonCodes.includes("data_incomplete_60m"));
+  assert.ok(!plan.reasonCodes.includes("data_incomplete_5m"));
+});
+
 test("alert message contains action and CMB estimated price", () => {
   const message = buildAlertMessage({
     action: "buy_setup",
