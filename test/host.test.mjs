@@ -70,6 +70,28 @@ test("normalizeConfig applies defaults and sanitizes input", () => {
   assert.equal(config.webhooks.generic[0].name, "n");
 });
 
+test("manual prev close overrides are normalized and applied to snapshots", () => {
+  const config = normalizeConfig({ manualPrevClose: { AU9999: "bad", XAU: 123.456, CMB: "" } });
+  assert.equal(config.manualPrevClose.AU9999, null);
+  assert.equal(config.manualPrevClose.XAU, 123.46);
+  assert.equal(config.manualPrevClose.CMB, null);
+
+  const now = new Date("2026-08-15T03:00:00Z");
+  const snap = buildSnapshot({
+    quotes: {
+      AU9999: { price: 950, prevClose: 940.72, source: "test", updatedAt: now.getTime() },
+      XAU: { price: 4375.8, prevClose: 4350.88, source: "test", updatedAt: now.getTime() },
+      USDCNY: { price: 6.7421, source: "test", updatedAt: now.getTime() },
+      CMB: null,
+    },
+    bars: { AU9999: { 1: [] }, XAU: { 1: [] }, CMB: { 1: [] } },
+    plan: null,
+  }, { ...config, manualPrevClose: { AU9999: 123.45, XAU: 4567.89, CMB: 888.88 } }, now);
+  assert.equal(snap.quotes.AU9999.prevClose, 123.45);
+  assert.equal(snap.quotes.XAU.prevClose, 4567.89);
+  assert.equal(snap.manualPrevClose.CMB, 888.88);
+});
+
 test("normalizeConfig derives total grams and average cost from lots", () => {
   const config = normalizeConfig({
     position: {
@@ -1135,23 +1157,42 @@ test("alert message labels CMB product, side and target clearly", () => {
   }, DEFAULT_CONFIG, "zh");
   assert.match(message.body, /招行积存金 现价 956\.49 元\/克/);
   assert.match(message.body, /招行卖出价 951\.49 元\/克/);
-  assert.match(message.body, /建议卖出 6克/);
+  assert.match(message.body, /建议按招行卖出价 951\.49 卖出 6克/);
   assert.match(message.body, /卖出目标价 951\.44 元\/克/);
   assert.doesNotMatch(message.body, /\bCMB\b 956\.49 元\/克 · 招行 951\.49/);
 });
 
 test("alert message labels buy side and CMB buy price clearly", () => {
+  const config = normalizeConfig({ cmb: { buySpreadPerGram: 2, sellSpreadPerGram: 1 } });
   const message = buildAlertMessage({
     action: "buy_setup",
     signalPrice: 948,
-    cmbEstimatedPrice: 950,
+    cmbEstimatedPrice: 949,
     targetPrice: 956,
-    suggestedOrder: { instrument: "Au99.99", side: "buy", signalPrice: 948, cmbEstimatedPrice: 950, grams: 10 },
-  }, DEFAULT_CONFIG, "zh");
+    suggestedOrder: { instrument: "Au99.99", side: "buy", signalPrice: 946, cmbEstimatedPrice: 948, grams: 10 },
+  }, config, "zh");
   assert.match(message.body, /Au99\.99 现价 948 元\/克/);
   assert.match(message.body, /招行买入价 950 元\/克/);
-  assert.match(message.body, /建议买入 10克/);
-  assert.match(message.body, /目标价 956 元\/克/);
+  assert.match(message.body, /建议挂单买入 10克/);
+  assert.match(message.body, /挂单价 948 元\/克/);
+  assert.match(message.body, /卖出目标价 956 元\/克/);
+});
+
+test("live CMB buy alert shows current price, not the lower suggested limit price", () => {
+  const message = buildAlertMessage({
+    action: "add_position",
+    cmbLive: true,
+    signalPrice: 950.78,
+    cmbEstimatedPrice: 945.78,
+    targetPrice: 945.85,
+    suggestedOrder: { instrument: "CMB", side: "buy", cmbLive: true, signalPrice: 947.48, cmbEstimatedPrice: 947.48, grams: 10 },
+  }, DEFAULT_CONFIG, "zh");
+  assert.match(message.body, /招行积存金 现价 950\.78 元\/克/);
+  assert.match(message.body, /招行买入价 950\.78 元\/克/);
+  assert.match(message.body, /建议挂单买入 10克/);
+  assert.match(message.body, /挂单价 947\.48 元\/克/);
+  assert.match(message.body, /卖出目标价 945\.85 元\/克/);
+  assert.doesNotMatch(message.body, /现价 947\.48/);
 });
 
 
