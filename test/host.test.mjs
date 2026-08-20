@@ -36,6 +36,11 @@ import {
 } from "../lib/index.js";
 
 /** Build `minutes` minute-aligned 1m bars ending at `now` (a Date or ms). */
+test("analysis model timeout defaults to 60 seconds", () => {
+  assert.equal(DEFAULT_CONFIG.analysis.timeoutMs, 60_000);
+  assert.equal(normalizeConfig({}).analysis.timeoutMs, 60_000);
+});
+
 function oneMinBars(now, minutes = 60, price = 950) {
   const end = Math.floor(new Date(now).getTime() / 60_000) * 60_000;
   const out = [];
@@ -104,6 +109,21 @@ test("normalizeConfig derives total grams and average cost from lots", () => {
   assert.equal(config.position.grams, 30);
   assert.equal(config.position.avgCostPerGram, 948.3333333333334);
   assert.equal(config.position.lots.length, 2);
+});
+
+test("normalizeConfig preserves an explicitly cleared position", () => {
+  const config = normalizeConfig({
+    position: {
+      grams: 30,
+      avgCostPerGram: 948.33,
+      lots: [],
+    },
+    limits: { maxGrams: 0 },
+  });
+  assert.equal(config.position.grams, 0);
+  assert.equal(config.position.avgCostPerGram, 0);
+  assert.deepEqual(config.position.lots, []);
+  assert.equal(config.limits.maxGrams, 0);
 });
 
 test("redactConfig blanks secrets and mergeSecrets keeps empty values", () => {
@@ -329,20 +349,20 @@ test("indicator helpers produce expected values", () => {
   assert.ok(boll.upper > boll.mid);
   assert.ok(boll.lower < boll.mid);
 
-  const bars = [
-    { t: 0, o: 1, h: 3, l: 0.5, c: 2 },
-    { t: 1, o: 2, h: 4, l: 1.5, c: 3 },
-    { t: 2, o: 3, h: 5, l: 2, c: 4 },
-  ];
+  const bars = [];
+  for (let index = 0; index < 15; index += 1) {
+    const close = index + 2;
+    bars.push({ t: index, o: close - 1, h: close + 1, l: close - 1.5, c: close });
+  }
   assert.ok(atr(bars, 14) > 0);
 });
 
 test("plan engine computes sell signal when target is reached", () => {
   const runtime = {
     quotes: {
-      AU9999: { price: 965, bid: 964, ask: 966, source: "sina", updatedAt: Date.now() },
-      XAU: { price: 4400, source: "tencent", updatedAt: Date.now() },
-      USDCNY: { price: 6.74, source: "tencent", updatedAt: Date.now() },
+      AU9999: { price: 965, bid: 964, ask: 966, source: "sina", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
+      XAU: { price: 4400, source: "tencent", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
+      USDCNY: { price: 6.74, source: "tencent", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
@@ -365,9 +385,9 @@ test("plan engine computes sell signal when target is reached", () => {
 test("plan engine sizes take-profit sells from max grams when configured", () => {
   const runtime = {
     quotes: {
-      AU9999: { price: 965, bid: 964, ask: 966, source: "sina", updatedAt: Date.now() },
-      XAU: { price: 4400, source: "tencent", updatedAt: Date.now() },
-      USDCNY: { price: 6.74, source: "tencent", updatedAt: Date.now() },
+      AU9999: { price: 965, bid: 964, ask: 966, source: "sina", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
+      XAU: { price: 4400, source: "tencent", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
+      USDCNY: { price: 6.74, source: "tencent", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
@@ -386,7 +406,7 @@ test("plan engine sizes take-profit sells from max grams when configured", () =>
 });
 
 test("plan engine uses live CMB prices when provided", () => {
-  const now = Date.now();
+  const now = new Date("2026-08-14T02:00:00Z").getTime();
   const runtime = {
     quotes: {
       AU9999: { price: 965, bid: 964, ask: 966, source: "sina", updatedAt: now },
@@ -416,7 +436,7 @@ test("plan engine uses live CMB prices when provided", () => {
 });
 
 test("plan engine still works with live CMB when Au99.99 is missing", () => {
-  const now = Date.now();
+  const now = new Date("2026-08-14T02:00:00Z").getTime();
   const runtime = {
     quotes: {
       AU9999: null,
@@ -465,9 +485,9 @@ test("plan engine ignores stale Au99.99 when live CMB is available", () => {
 test("plan engine stays quiet when market is closed", () => {
   const runtime = {
     quotes: {
-      AU9999: { price: 950, bid: 949, ask: 951, source: "sina", updatedAt: Date.now() },
-      XAU: { price: 4375, source: "tencent", updatedAt: Date.now() },
-      USDCNY: { price: 6.74, source: "tencent", updatedAt: Date.now() },
+      AU9999: { price: 950, bid: 949, ask: 951, source: "sina", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
+      XAU: { price: 4375, source: "tencent", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
+      USDCNY: { price: 6.74, source: "tencent", updatedAt: Date.parse("2026-08-14T02:00:00Z") },
     },
     bars: { AU9999: { 5: [], 60: [] }, XAU: { 5: [], 60: [] } },
   };
@@ -479,8 +499,8 @@ test("plan engine stays quiet when market is closed", () => {
 test("plan engine computes buy setup when intraday trend and support align", () => {
   function makeBars(start, end, base, rise) {
     const bars = [];
-    let price = base;
-    for (let t = start; t <= end; t += 5 * 60_000) {
+    let price = base - 210 * rise;
+    for (let t = start - 210 * 5 * 60_000; t <= end; t += 5 * 60_000) {
       const o = price;
       const c = price + rise;
       price = c;
@@ -488,7 +508,7 @@ test("plan engine computes buy setup when intraday trend and support align", () 
     }
     return bars;
   }
-  const now = Date.now();
+  const now = new Date("2026-08-14T02:00:00Z").getTime();
   const runtime = {
     quotes: {
       AU9999: { price: 951, bid: 950.8, ask: 951.2, source: "test", updatedAt: now },
@@ -500,7 +520,7 @@ test("plan engine computes buy setup when intraday trend and support align", () 
       // XAU 是首选信号标的：bars 用美元口径，折算后与现价一致
       XAU: {
         1: oneMinBars("2026-08-14T02:00:00Z", 60),
-        5: makeBars(now - 120 * 5 * 60_000, now, 4315, 0.5),
+        5: makeBars(now - 150 * 5 * 60_000, now, 4315, 0.4),
         60: makeBars(now - 120 * 60 * 60_000, now, 4315, 0.5),
       },
     },
@@ -518,8 +538,8 @@ test("plan engine computes buy setup when intraday trend and support align", () 
 test("plan engine suggests add position when holding and setup aligns", () => {
   function makeBars(start, end, base, rise) {
     const bars = [];
-    let price = base;
-    for (let t = start; t <= end; t += 5 * 60_000) {
+    let price = base - 210 * rise;
+    for (let t = start - 210 * 5 * 60_000; t <= end; t += 5 * 60_000) {
       const o = price;
       const c = price + rise;
       price = c;
@@ -527,7 +547,7 @@ test("plan engine suggests add position when holding and setup aligns", () => {
     }
     return bars;
   }
-  const now = Date.now();
+  const now = new Date("2026-08-14T02:00:00Z").getTime();
   const runtime = {
     quotes: {
       AU9999: { price: 951, bid: 950.8, ask: 951.2, source: "test", updatedAt: now },
@@ -538,7 +558,7 @@ test("plan engine suggests add position when holding and setup aligns", () => {
       AU9999: { 1: [], 5: [], 60: [] },
       XAU: {
         1: oneMinBars("2026-08-14T02:00:00Z", 60),
-        5: makeBars(now - 120 * 5 * 60_000, now, 4315, 0.5),
+        5: makeBars(now - 150 * 5 * 60_000, now, 4315, 0.4),
         60: makeBars(now - 120 * 60 * 60_000, now, 4315, 0.5),
       },
     },
@@ -561,8 +581,8 @@ test("plan engine suggests add position when holding and setup aligns", () => {
 test("plan engine suggests reduce position on overbought weakness", () => {
   function makeBarsWithDrop(start, end, base, rise, dropEnd) {
     const bars = [];
-    let price = base;
-    for (let t = start; t <= end; t += 5 * 60_000) {
+    let price = base - 210 * rise;
+    for (let t = start - 210 * 5 * 60_000; t <= end; t += 5 * 60_000) {
       const o = price;
       if (t >= dropEnd) {
         const c = price - 0.2;
@@ -576,7 +596,7 @@ test("plan engine suggests reduce position on overbought weakness", () => {
     }
     return bars;
   }
-  const now = Date.now();
+  const now = new Date("2026-08-14T02:00:00Z").getTime();
   const dropEnd = now - 5 * 60_000;
   const runtime = {
     quotes: {
@@ -588,7 +608,7 @@ test("plan engine suggests reduce position on overbought weakness", () => {
       AU9999: { 1: [], 5: [], 60: [] },
       XAU: {
         1: oneMinBars("2026-08-14T02:00:00Z", 60),
-        5: makeBarsWithDrop(now - 120 * 5 * 60_000, now, 4315, 0.5, dropEnd),
+        5: makeBarsWithDrop(now - 150 * 5 * 60_000, now, 4315, 0.5, dropEnd),
         60: makeBarsWithDrop(now - 120 * 60 * 60_000, now, 4315, 0.5, dropEnd),
       },
     },
@@ -609,8 +629,8 @@ test("plan engine suggests reduce position on overbought weakness", () => {
 test("plan engine does not reduce an already-light position", () => {
   function makeBarsWithDrop(start, end, base, rise, dropEnd) {
     const bars = [];
-    let price = base;
-    for (let t = start; t <= end; t += 5 * 60_000) {
+    let price = base - 210 * rise;
+    for (let t = start - 210 * 5 * 60_000; t <= end; t += 5 * 60_000) {
       const o = price;
       if (t >= dropEnd) {
         const c = price - 0.2;
@@ -624,7 +644,7 @@ test("plan engine does not reduce an already-light position", () => {
     }
     return bars;
   }
-  const now = Date.now();
+  const now = new Date("2026-08-14T02:00:00Z").getTime();
   const dropEnd = now - 5 * 60_000;
   const runtime = {
     quotes: {
@@ -636,7 +656,7 @@ test("plan engine does not reduce an already-light position", () => {
       AU9999: { 1: [], 5: [], 60: [] },
       XAU: {
         1: oneMinBars("2026-08-14T02:00:00Z", 60),
-        5: makeBarsWithDrop(now - 120 * 5 * 60_000, now, 4315, 0.5, dropEnd),
+        5: makeBarsWithDrop(now - 150 * 5 * 60_000, now, 4315, 0.5, dropEnd),
         60: makeBarsWithDrop(now - 120 * 60 * 60_000, now, 4315, 0.5, dropEnd),
       },
     },
@@ -723,8 +743,8 @@ test("plan engine resets cooldown when user position changes", () => {
 test("plan engine requires consecutive confirmation before issuing a buy signal", () => {
   function makeBars(start, end, base, rise) {
     const bars = [];
-    let price = base;
-    for (let t = start; t <= end; t += 5 * 60_000) {
+    let price = base - 210 * rise;
+    for (let t = start - 210 * 5 * 60_000; t <= end; t += 5 * 60_000) {
       const o = price;
       const c = price + rise;
       price = c;
@@ -743,7 +763,7 @@ test("plan engine requires consecutive confirmation before issuing a buy signal"
       AU9999: { 1: [], 5: [], 60: [] },
       XAU: {
         1: oneMinBars("2026-08-14T02:00:00Z", 60),
-        5: makeBars(now.getTime() - 120 * 5 * 60_000, now.getTime(), 4315, 0.5),
+        5: makeBars(now.getTime() - 150 * 5 * 60_000, now.getTime(), 4315, 0.4),
         60: makeBars(now.getTime() - 120 * 60 * 60_000, now.getTime(), 4315, 0.5),
       },
     },
@@ -789,7 +809,7 @@ test("plan engine refuses to trade on stale quotes", () => {
   assert.ok(plan.reasonCodes.includes("stale_quote"));
 });
 
-test("coverage gate requires >80% valid per-minute data in every 5/10/30/60 window", () => {
+test("coverage gate requires >80% for 5/10m and >60% for 30/60m valid per-minute data", () => {
   const now = new Date("2026-08-14T02:00:00Z");
   const full = oneMinBars(now, 60);
   assert.equal(windowCoverage(full, now, 60), 1);
@@ -814,12 +834,18 @@ test("coverage gate requires >80% valid per-minute data in every 5/10/30/60 wind
   assert.equal(gateBad.coverage[5], 1);
 
   // Missing minute inside the 5m window: 4/5 = 80% is NOT enough,
-  // while 10/30/60 stay above 80%.
+  // while 10/30/60 remain above their applicable thresholds.
   const missingMinute = oneMinBars(now, 60).filter((bar) => bar.t !== Math.floor(now.getTime() / 60_000) * 60_000 - 2 * 60_000);
   const gateGap = coverageGate(missingMinute, now);
   assert.equal(gateGap.ok, false);
   assert.deepEqual(gateGap.failing, [5]);
   assert.equal(gateGap.coverage[10], 0.9);
+
+  // 37/60 is above the 60% long-window threshold, while 5/10m remain complete.
+  const longWindowsValid = coverageGate(oneMinBars(now, 37), now);
+  assert.equal(longWindowsValid.ok, true);
+  assert.deepEqual(longWindowsValid.failing, []);
+  assert.equal(longWindowsValid.coverage[60], 0.62);
 
   // Restricted windows: coverage is reported for all four windows, but only
   // the passed windows are validated (the session warm-up behaviour).
@@ -861,7 +887,7 @@ test("resampleBars aggregates 5m bars into 10m/30m bars", () => {
   assert.deepEqual(resampleBars([], 2), []);
 });
 
-test("plan engine withholds suggestions when per-minute coverage is below 80%", () => {
+test("plan engine withholds suggestions when 30/60m coverage is below 60%", () => {
   const now = new Date("2026-08-14T02:00:00Z");
   const runtime = {
     quotes: {
@@ -887,8 +913,8 @@ test("plan engine withholds suggestions when per-minute coverage is below 80%", 
 test("plan engine requires EMA20 rising on 10/30/60m for the trend filter", () => {
   function makeBars(start, end, base, rise) {
     const bars = [];
-    let price = base;
-    for (let t = start; t <= end; t += 5 * 60_000) {
+    let price = base - 210 * rise;
+    for (let t = start - 210 * 5 * 60_000; t <= end; t += 5 * 60_000) {
       const o = price;
       const c = price + rise;
       price = c;
@@ -909,7 +935,7 @@ test("plan engine requires EMA20 rising on 10/30/60m for the trend filter", () =
       AU9999: { 1: [], 5: [], 60: [] },
       XAU: {
         1: oneMinBars(now, 60),
-        5: makeBars(now.getTime() - 120 * 5 * 60_000, now.getTime(), 4315, 0),
+        5: makeBars(now.getTime() - 150 * 5 * 60_000, now.getTime(), 4315, 0),
         60: makeBars(now.getTime() - 120 * 60 * 60_000, now.getTime(), 4300, 0.08),
       },
     },
@@ -931,13 +957,13 @@ test("snapshot exposes data coverage alongside an incomplete plan", () => {
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: oneMinBars(now, 40), 5: [] },
+      XAU: { 1: oneMinBars(now, 30), 5: [] },
       CMB: { 1: [], 5: [] },
     },
     plan: null,
   }, DEFAULT_CONFIG, now);
   assert.equal(snap.plan.action, "data_incomplete");
-  assert.equal(snap.plan.dataCoverage[60], 0.67);
+  assert.equal(snap.plan.dataCoverage[60], 0.5);
   assert.equal(snap.plan.dataCoverage[5], 1);
   assert.equal(snap.plan.suggestedOrder, null);
 });

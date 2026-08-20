@@ -1,6 +1,6 @@
-# dsh-plugin-goldboard — 设计文档（v0，待实现）
+# dsh-plugin-goldboard — 设计文档（v1.2 实现基线）
 
-> 状态：需求访谈与评审问题已逐项确认，设计已落盘；实现前可再做一次最终确认。
+> 状态：P0 数据口径、P1 质量/回放和 P2 Harness 多模型分析已实现；本文保留原始产品约束，并记录当前实现接口。
 > 目标环境：DeepSeek Harness Web GUI，本地 `link:` 安装到 `web` profile。
 > 插件形态：双面 Cordis 包（Node 宿主半 + 手写 factory-CJS 浏览器半），无构建步骤。
 
@@ -74,7 +74,7 @@
 | storage | `$DSH_HOME/storages/dsh-plugin-goldboard/` |
 | 路由前缀 | `/dsh-plugin-goldboard/*` |
 | profile loader | `- insert: { id: dsh-plugin-goldboard, name: 'dsh-plugin-goldboard' }` |
-| 宿主依赖 | `inject: ["webServer"]` |
+| 宿主依赖 | `inject: ["webServer", "llm"]` |
 | 浏览器依赖 | `inject: ["slots", "locale"]` |
 
 ---
@@ -93,8 +93,10 @@
 │  settings.section                                                             │
 │    GoldBoardSettings：持仓、上限、手续费（买0卖5）、招行价差、信号阈值、          │
 │    交易时段（工作日 09:00–次日02:00，节假日表）、提醒渠道                       │
+│    模型与分析：Harness provider/model/reasoning、立即分析、查询日志             │
 │                                                                              │
 │  轮询 GET /dsh-plugin-goldboard/snapshot（10s 报价，60s K 线；页面隐藏时降频） │
+│  GET /models、POST /analysis、GET /analysis-logs（模型调用与审计日志）          │
 │  语言切换：locale.register(NS, { zh, en })，所有可见文案走 t()                  │
 └──────────────────────────────────┬───────────────────────────────────────────┘
                                    │ HTTP（webServer，同源）
@@ -108,17 +110,25 @@
 │    K 线：     东财 118.AU9999（5/15/60/日线）；XAU 日线（新浪）+ 现货轮询自建分钟线 │
 │    - 30s 报价轮询，K 线增量补齐，指数退避，来源熔断，磁盘缓存                      │
 │                                                                              │
-│  指标引擎：SMA/EMA、RSI、MACD、布林带、ATR、近期支撑/阻力                       │
+│  指标引擎：SMA/EMA、Wilder RSI/ATR、MACD、布林带、近期支撑/阻力；只用收盘 K 线 │
+│            输出 calculationVersion、warmupReady、synthetic 和口径元数据         │
+│  质量/回放：Quote/Bar 规范化、OHLC/重复桶/覆盖率/stale/warm-up 检查、固定回放      │
 │  策略引擎：持仓/上限/手续费/招行价差 → 回本价、建议买卖价、建议克数、止损参考     │
-│            （5/10/30/60 分钟数据覆盖率门槛，>80% 才出建议）                    │
+│            （5/10 分钟覆盖率 >80%、30/60 分钟 >60% 才出建议）                    │
+│  分析引擎：ctx.llm 目录 → prepareCall → stream → JSON/schema → 脱敏 JSONL       │
 │  提醒引擎：阈值穿越边沿触发（无冷却、无勿扰）+ 交易时段抑制                     │
 │  通知引擎：系统通知（osascript / notify-send / PowerShell）、Webhook            │
 │  持久化：$DSH_HOME/storages/dsh-plugin-goldboard/{config,state,cache}.json     │
+│            + analysis-log.jsonl（started/finished，保留/分页/脱敏）              │
 │                                                                              │
 │  路由（每个路径注册一次，内部按 method 分发）：                                  │
 │    GET/POST /dsh-plugin-goldboard/config                                      │
+│    GET      /dsh-plugin-goldboard/models                                      │
+│    GET/POST /dsh-plugin-goldboard/analysis                                    │
+│    GET      /dsh-plugin-goldboard/analysis-logs                               │
 │    GET      /dsh-plugin-goldboard/snapshot                                    │
 │    GET      /dsh-plugin-goldboard/bars?instrument=&interval=&limit=            │
+│    POST     /dsh-plugin-goldboard/replay                                      │
 │    POST     /dsh-plugin-goldboard/test-notify                                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -131,14 +141,45 @@
 
 ---
 
-## 5. 行情数据源契约（免费源，实测可用）
+## 5. 已实现的升级模块
 
-### 5.1 报价源
+### 5.1 数据与质量接口
+
+`lib/market-quality.js` 是行情适配器与规则/分析调用之间的深模块接口：
+
+- `normalizeQuoteRecord(key, quote)`：统一 `instrument`、`market`、`currency`、`unit`、来源质量和时间字段；Yahoo `GC=F` 固定为 `futures/GC=F`。
+- `normalizeBarRecord()` / `closedBars()`：拒绝无效 OHLC，保留 `synthetic` 和来源元数据，只把已收盘桶交给正式指标。
+- `assessMarketQuality()`：集中检查 stale、OHLC、重复桶、覆盖率、warm-up、品种口径和 CMB 买卖价差，返回稳定 `reasonCodes`。
+- `replayMarketPlan()`：用固定 `asOf`、报价和 bars 重建指标与规则 plan，不发起网络请求或模型调用。
+
+指标计算版本为 `goldboard-indicators-v2`，EMA 使用 SMA seed，RSI/ATR 使用 Wilder 平滑。XAU 指标保持 USD/盎司原生口径，只在展示和 CMB 估算价上做当前汇率转换。
+
+### 5.2 Harness 分析接口
+
+`lib/analysis.js` 只依赖宿主提供的 `ctx.llm`：
+
+1. `listProviders()`、`listModels()`、`resolveModelInfo()` 合并成 `/models` 只读投影；单个 provider 失败进入 `failures`。
+2. `prepareCall({ provider, model, reasoningEffort, temperature, maxTokens })` 固定一次调用，再通过准备好的 handle `stream()`。
+3. 输入只包含宿主快照、已收盘 bars、指标、质量和规则 plan；系统约束 `noPriceFabrication`、`noOrderExecution`，模型动作不含 buy/sell。
+4. 独立 AbortSignal/超时、input hash 缓存、running 去重和 `force` 缓存绕过不影响行情 tick。
+5. text blocks 严格 JSON parse 和结构校验；provider、超时、取消、空输出、JSON/schema 失败分别进入稳定状态。
+
+`lib/analysis-log.js` 将一次调用的 `started`/`finished` 事件写入 JSONL，合并成可分页摘要；详情默认脱敏，进程重启时遗留 `running` 会标记为 `aborted`。
+
+### 5.3 客户端设置
+
+客户端继续使用独立 `settings.section`，不改为 `settings.plugin.item`。模型选择保存在插件配置中，不读写 Harness 全局会话模型；查询日志使用独立对话框，支持状态/provider/model/时间筛选、游标分页、详情复制、Escape 关闭和中英文即时切换。
+
+---
+
+## 6. 行情数据源契约（免费源，实测可用）
+
+### 6.1 报价源
 
 | 用途 | 主源 | 备用源 | 说明 |
 | --- | --- | --- | --- |
 | Au99.99 报价 | 新浪 `hq.sinajs.cn/list=gds_AU9999` | 上金所 SGE `www.sge.com.cn/graph/quotations` → 东财 `push2.eastmoney.com/api/qt/stock/get?secid=118.AU9999` → 60s API | 新浪需 `Referer: https://finance.sina.com.cn/`，GBK 解码；东财 JSON，价格字段按 100 倍缩放（实测 `f43=95000` = 950.00）；SGE 用 POST `instid=Au99.99` |
-| XAU 伦敦现货 | 新浪/腾讯 `hf_XAU` | gold-api.com → 60s API → GoldPrice.Today → Yahoo Finance | GBK 解码；腾讯需 GBK→UTF-8；gold-api.com 无需 key |
+| XAU 伦敦现货 | 新浪/腾讯 `hf_XAU` | gold-api.com → 60s API → GoldPrice.Today | GBK 解码；腾讯需 GBK→UTF-8；gold-api.com 无需 key；Yahoo `GC=F` 单独作为期货诊断，不进入现货 fallback |
 | USDCNY | 腾讯 `whUSDCNY` | 配置项手动覆盖 | 解析 `~` 分隔字段；仅用于元/克换算展示 |
 | 品牌金价/积存金（状态页） | 金投网 `api.jijinhao.com` | 京东金融 `api.jdjygold.com` | 非主信号源，仅在数据源状态/日志中展示 |
 
@@ -149,20 +190,18 @@
 - `whUSDCNY`：6.7421
 - 折算价 = `4375.80 × 6.7421 ÷ 31.1034768 ≈ 948.51 元/克`，国内价溢价约 1.49 元/克（0.16%）
 
-### 5.2 K 线源
+### 6.2 K 线源
 
 - Au99.99：东财
   `push2his.eastmoney.com/api/qt/stock/kline/get?secid=118.AU9999&klt=5|15|30|60|101&fqt=1&lmt=...`
   实测 60 分钟与日线可用；字段 `f51..f58` = `date,open,close,high,low,volume,amount,amplitude`。
   历史兜底：上金所 `POST https://www.sge.com.cn/graph/Dailyhq`（`instid=Au99.99`，行格式 `[日期, 开, 收, 低, 高]`）。
-- XAU 日线：Yahoo Finance
-  `query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=5y`
-  免费日线历史；也可参考新浪
-  `stock2.finance.sina.com.cn/futures/api/jsonp.php/.../GlobalFuturesService.getGlobalFuturesDailyKLine?symbol=XAU`
-  （实测 2006 年至今日线可用）。
-- XAU 分钟线：免费源不稳定。v1 方案：宿主以 30s 现货报价自建 1m/5m/15m/60m bars（`open,high,low,close,ts`），冷启动时分钟级指标标注“数据积累中”，日线指标正常可用。
+- XAU/USD 现货 K 线：东财 `122.XAU` 为现货主源；源不可用时质量状态明确降级，不把其他品种改名为现货。
+- `GC=F` 期货日线诊断：Yahoo Finance
+  `query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=5y`，独立保存到 `GCF` lane，不参与 XAU/USD 现货指标。
+- XAU 分钟线：免费源不稳定。宿主以 30s 现货报价自建 1m/5m/15m/60m bars（`open,high,low,close,ts`），标记 `synthetic=true`；正式指标排除当前未收盘桶，冷启动时标注 warm-up 未完成。
 
-### 5.3 采集规则
+### 6.3 采集规则
 
 - 报价轮询 30s（可配置 15–120s）；K 线增量每 5 分钟补齐一次。
 - 每源独立超时（5s）、重试（指数退避 2s/4s/8s，最多 3 次）、熔断（连续 3 次失败停用 10 分钟）。
@@ -170,7 +209,7 @@
 - 磁盘缓存所有原始响应与最近 bars；宿主重启后先读缓存再补增量。
 - 不做高频轮询，遵守免费源非官方接口的容忍度；接口变更时必须降级而不是崩溃。
 
-### 5.4 交易时段与市场状态
+### 6.4 交易时段与市场状态
 
 - 交易时段按**招商银行积存金**（北京时间，可在设置页编辑）：
   - 每周一至周五 09:00–次日 02:00 为可交易时段（周五 09:00 开启的时段延续到周六 02:00 结束）。
@@ -187,9 +226,9 @@
 
 ---
 
-## 6. 指标与信号引擎（v1 透明规则）
+## 7. 指标与信号引擎（v1 透明规则）
 
-### 6.1 指标（宿主内纯 JS 计算，不引第三方库）
+### 7.1 指标（宿主内纯 JS 计算，不引第三方库）
 
 - 均线：SMA5 / SMA20 / SMA60；EMA12 / EMA26
 - MACD：DIF / DEA / 柱
@@ -200,7 +239,7 @@
 
 计算顺序固定：先补足 bars → 数据覆盖率门槛 → 计算指标 → 快照输出。任何指标因数据不足不输出信号，只显示 `数据积累中`。
 
-### 6.2 手续费与回本线
+### 7.2 手续费与回本线
 
 - 配置默认：`fee.buyPerGram = 0`，`fee.sellPerGram = 5`（双边合计 5，可调，设置页显示总额与回本线预览）。
 - 招行价差：`cmb.buySpreadPerGram = 1.72`、`cmb.sellSpreadPerGram = 1.72`（可调，可负）。
@@ -213,14 +252,14 @@
 - 所有“建议卖出价”必须 ≥ 回本价；否则显示“当前波动不足以覆盖成本”，不输出买入信号。
 - 信号价优先级：**招行实时 → 国际金价按汇率折算 → Au99.99**（国际价也不可用时回退 Au99.99 + 价差估算招行价）。展示与委托建议同时给出 `signalPrice` 和 `cmbEstimatedPrice` 两个数字。
 
-### 6.3 信号规则（默认参数全部可在设置页调整）
+### 7.3 信号规则（默认参数全部可在设置页调整）
 
 **数据完整性门槛（所有建议共用，v1.1）**
 
 - 信号按标的（**招行实时价 → 国际金价折算 → Au99.99**）选择后，检查该标的 1 分钟 bars：
-  最近 **5/10/30/60 分钟**每个窗口的有效数据覆盖率必须 **> 80%**（每分钟一个价格点，有 1 分钟 bar 且收盘价有效才计入）。
+  最近 **5/10 分钟**窗口的有效数据覆盖率必须 **> 80%**，**30/60 分钟**窗口必须 **> 60%**（每分钟一个价格点，有 1 分钟 bar 且收盘价有效才计入）。
 - 任一窗口不达标：`action = data_incomplete`，不输出建议委托单，看板显示「当前数据有缺失，暂不给出建议」，并展示各窗口覆盖率（`plan.dataCoverage`，如 `{ "5": 1, "10": 0.9, "30": 0.97, "60": 0.83 }`）与对应 `reasonCodes`（如 `data_incomplete_60m`）。
-- **开盘后 1 小时内与每天 0 点-1 点期间的放宽**：30/60 分钟窗口在开盘初期或跨日 0-1 点时段天然不足（60 分钟窗口约需累积 49 个分钟点才 >80%），因此开盘后 1 小时内、以及每天北京时间 0 点-1 点期间，只校验 **5/10 分钟**窗口；数据参考仍尽量覆盖 5/10/30/60（指标照常按四个周期计算，10/30/60 分钟线有历史预热时趋势过滤不受影响）。`dataCoverage` 仍报告全部四个窗口，仅 `reasonCodes`/拦截按生效窗口输出。
+- **开盘后 1 小时内与每天 0 点-1 点期间的放宽**：30/60 分钟窗口在开盘初期或跨日 0-1 点时段天然不足（60 分钟窗口约需累积 37 个分钟点才 >60%），因此开盘后 1 小时内、以及每天北京时间 0 点-1 点期间，只校验 **5/10 分钟**窗口；数据参考仍尽量覆盖 5/10/30/60（指标照常按四个周期计算，10/30/60 分钟线有历史预热时趋势过滤不受影响）。`dataCoverage` 仍报告全部四个窗口，仅 `reasonCodes`/拦截按生效窗口输出。
 - 门槛不替代过期检查：报价过期仍走 `data_stale`；休市仍走 `market_closed`。
 - 覆盖率的其余预期后果：轮询间隔 > 60s 或报价中断会按缺口如实反映（5 分钟窗口缺 1 分钟即 80% 不达标）。
 
@@ -258,7 +297,7 @@
 
 - 当 Au99.99 与 XAU 折算价的价差超过近 20 日价差均值 ± 2σ 时，输出 `spread_alert`，仅提示“内外盘异常”，不直接开仓。
 
-### 6.4 建议委托单（手动执行）
+### 7.4 建议委托单（手动执行）
 
 每条交易建议生成：
 
@@ -279,7 +318,7 @@
 - `validUntil` 取当前招行交易时段结束前 10 分钟，超时后建议自动失效。
 - 浏览器侧提供“一键复制委托文本”，文本中明确写“招行积存金估算价，以 App 实际报价为准”，不执行任何下单动作。
 
-### 6.5 提醒边沿触发（无冷却、无勿扰）
+### 7.5 提醒边沿触发（无冷却、无勿扰）
 
 - 每个 `action` 维护 `idle → armed → fired` 状态机，只在条件从 false→true 的**边沿**触发，避免同一个 tick 内重复发送。
 - **不设时间冷却、不设勿扰时段**：交易时段内价格重新穿越阈值就再次立即提醒。
@@ -288,12 +327,12 @@
 
 ---
 
-## 7. 宿主路由契约
+## 8. 宿主路由契约
 
 统一响应信封：`{ ok: true, ... }` 或 `{ ok: false, error: { code, message?, details? } }`。
 每个路径只注册一次，内部按 `req.method` 分发；请求体读入设 256 KiB 上限（413）。
 
-### 7.1 `GET /dsh-plugin-goldboard/config`
+### 8.1 `GET /dsh-plugin-goldboard/config`
 
 返回脱敏配置 + `secretSet`（对齐 `dsh-plugin-notify` 写法）：
 
@@ -318,7 +357,7 @@
 }
 ```
 
-### 7.2 `POST /dsh-plugin-goldboard/config`
+### 8.2 `POST /dsh-plugin-goldboard/config`
 
 请求：
 
@@ -334,8 +373,27 @@
 - 空字符串 secret = 保留旧值；非空 = 替换；`clearSecrets` 列出的 = 清空。
 - 校验：手续费默认 `buyPerGram=0, sellPerGram=5`（总额 5，允许用户改，但设置页给出成本影响提示）；招行价差允许负值；克数与金额非负、上限 ≤ 100000 克、成本价 > 0。
 - 响应返回脱敏后的完整配置。
+- `analysis.enabled=true` 时，保存前用 `ctx.llm.prepareCall()` 校验 provider/model/reasoning；不可用时返回稳定错误码，不静默替换模型。
 
-### 7.3 `GET /dsh-plugin-goldboard/snapshot`
+### 8.3 `GET /dsh-plugin-goldboard/models`
+
+返回当前 `ctx.llm` 的 provider/model/reasoning 目录；单个 provider 失败进入 `failures`，空目录不回退到硬编码模型。
+
+### 8.4 `GET/POST /dsh-plugin-goldboard/analysis`
+
+- `GET` 返回当前 running 查询、最近结果和日志健康状态。
+- `POST` 读取宿主最新快照，执行质量门控、缓存/running 去重和 provider-neutral 模型调用。
+- 每个真实调用返回 `queryId`；`force=true` 只绕过缓存，不绕过 stale、coverage、warm-up 或品种口径门控。
+
+### 8.5 `GET /dsh-plugin-goldboard/analysis-logs`
+
+支持 `limit`、`cursor`、`queryId`、`status`、`provider`、`model`、`from`、`to` 和 `detail=true`。默认列表只返回摘要，详情也不返回凭据、Authorization、Webhook secret 或原始 prompt。
+
+### 8.6 `POST /dsh-plugin-goldboard/replay`
+
+接收固定 `asOf`、quotes 和 bars，纯函数重建质量、指标、plan 与 snapshot；不请求行情源、不发提醒、不调用模型。
+
+### 8.7 `GET /dsh-plugin-goldboard/snapshot`
 
 ```json
 {
@@ -350,7 +408,8 @@
   "derived": {
     "xauCnyPerGram": 948.51,
     "domesticPremiumPerGram": 1.49,
-    "domesticPremiumPct": 0.0016,
+    "domesticPremiumRatio": 0.0016,
+    "domesticPremiumPct": 0.16,
     "cmb": { "buyPrice": 950.23, "sellPrice": 950.23, "sourceNote": "国际金价按汇率折算 948.51 + 1.72 元/克估算" }
   },
   "trend": {
@@ -368,19 +427,19 @@
 - `plan.action = data_incomplete` 时 `suggestedOrder = null`，`dataCoverage` 给出 5/10/30/60 分钟各窗口的每分钟数据覆盖率（信号标的口径）。
 - 客户端只消费此结构，具体指标增减在实现阶段冻结。
 
-### 7.4 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1m&limit=120`
+### 8.8 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1m&limit=120`
 
 - 参数白名单校验；返回该标的最近 bars，供展开浮窗时补充历史。
 
-### 7.5 `POST /dsh-plugin-goldboard/test-notify`
+### 8.9 `POST /dsh-plugin-goldboard/test-notify`
 
 - 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用），用于设置页验证。
 
 ---
 
-## 8. 浏览器半设计
+## 9. 浏览器半设计
 
-### 8.1 浮窗看板（`shell.overlay`）
+### 9.1 浮窗看板（`shell.overlay`）
 
 - 插槽：`slots.inject("shell.overlay", () => slots.register({ name: "shell.overlay", id: "dsh-plugin-goldboard-board", order: 200, locale: NS }, GoldBoardOverlay))`
 - 浮层根节点：
@@ -396,7 +455,7 @@
 - 数据流：`useSyncExternalStore` 或 `useEffect + setInterval` 订阅宿主 snapshot；页面 `visibilitychange` 隐藏时轮询降到 60s，显示时恢复 10s。
 - 语言：所有文本经 `t()`；`locale: NS` 保证切换即时重渲染。
 
-### 8.2 设置页（`settings.section`）
+### 9.2 设置页（`settings.section`）
 
 - 插槽：`id: "dsh-plugin-goldboard"`，`order: 65`，`locale: NS`。
 - 分区：
@@ -411,7 +470,7 @@
 - 按钮使用 `--dsw-alias-button-primary-fill / hover`；卡片透明 + `border-l2`；开关用 `state-business-primary`；不得硬编码颜色。
 - 双语字典 `DICT.zh` / `DICT.en` 必须 1:1 键集合，测试断言。
 
-### 8.3 文案与免责
+### 9.3 文案与免责
 
 - 看板常驻一行小字：`技术面参考，非投资建议`。
 - 每个建议委托弹层/卡片包含 `风险提示` 与 `扣费后回本价`。
@@ -419,7 +478,7 @@
 
 ---
 
-## 9. 持久化与状态
+## 10. 持久化与状态
 
 | 文件 | 内容 |
 | --- | --- |
@@ -433,7 +492,7 @@
 
 ---
 
-## 10. 通知引擎
+## 11. 通知引擎
 
 - 系统通知：
   - macOS `osascript display notification`
@@ -449,7 +508,7 @@
 
 ---
 
-## 11. 关键风险与缓解
+## 12. 关键风险与缓解
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
@@ -466,7 +525,7 @@
 
 ---
 
-## 12. 验证计划
+## 13. 验证计划
 
 - 离线：
   - `node --check lib/index.js lib/client.js`
@@ -483,7 +542,7 @@
 
 ---
 
-## 13. 评审问题确认结果（已逐项 ask-question 确认）
+## 14. 评审问题确认结果（已逐项 ask-question 确认）
 
 1. 手续费拆分：**买入 0 + 卖出 5**（双边合计 5）。
 2. 交易标的：实际交易**招行积存金**；插件信号用 Au99.99（缺失时用国际金价折算），招行价兜底按国际金价按汇率折算 + 固定价差估算（默认 +1.72 元/克，买卖可分别调）。
