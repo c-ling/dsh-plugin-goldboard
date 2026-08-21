@@ -14,20 +14,20 @@ A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right fl
 Install into the web profile from GitHub (requires `pnpm` on `PATH`; otherwise use the corepack fallback below):
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
 Or with an existing `dsh` binary:
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
 When `pnpm` is not on `PATH`:
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
 > `dsh plugin` forwards its arguments to pnpm and fetches the package from this repo (pnpm 9+, `git` required). The warning `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is not a profile bundle layer; it is activated by the loader row below.
@@ -66,12 +66,12 @@ The model catalog comes from currently registered Harness providers. Log queries
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
-# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
-# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
+# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
+# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
-Re-running the install command with the new `#v1.5.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
+Re-running the install command with the new `#v1.6.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
 
 ## Uninstall
 
@@ -96,6 +96,7 @@ This plugin keeps state under `$DSH_HOME/storages/dsh-plugin-goldboard/`, which 
 - Pending-order tracking: the plugin remembers the most recently alerted suggested order. If a later signal change invalidates the previous suggestion (wait / market closed / incomplete data / stop, etc.) or changes its direction, price or grams, it sends an extra “cancel previous order / order updated” alert so you do not keep acting on a stale order.
 - Alerts: host system notifications (macOS/Linux/Windows) + Feishu/DingTalk/WeCom/generic webhooks; no cooldown, no quiet hours — every threshold crossing during trading hours alerts immediately. Two protective tips are also included: a reduce-on-weakness alert when a position is held and the 5-minute RSI is overbought (default >75) together with a bearish engulfing bar or a long upper shadow (`sell_weakness`, parameters configurable), and a domestic-premium anomaly alert when today's premium deviates beyond ±2σ of the last 60 completed days (population σ, ≥20 days of samples; `spread_alert`, informational only). The alerts log records the real per-channel delivery result.
 - Trading hours: weekdays 09:00–next-day 02:00, editable holidays.
+- Settings storage (v1.6.0): configuration moves to the Harness-wide settings document (the `dsh-plugin-goldboard` namespace in `$DSH_HOME/settings.yaml`); saved changes apply immediately and survive refreshes and restarts. A legacy `config.json` is migrated automatically on the first start after upgrading and kept as `config.json.migrated`; hosts without a settings provider fall back to the classic storage with no feature loss. Webhook signing secrets are write-only and never echoed — the page only shows a "Configured" badge.
 - Bilingual UI that follows Settings → General → Language; dark/light theming via DSW tokens.
 - Auditable market semantics: quotes expose `instrument`, `market`, `currency`, `unit` and source-quality metadata; XAU/USD spot and Yahoo `GC=F` futures stay in separate lanes. Polling and FX-derived bars are explicitly marked `synthetic`; formal indicators use closed bars only and expose `calculationVersion`, `warmupReady` and fixed Wilder smoothing methods. Fixed-fixture replay is available at `POST /dsh-plugin-goldboard/replay`.
 - Manual model analysis: choose a provider, model and reasoning effort from the current Harness catalog without changing the active conversation model. The model explains host-computed indicators and the rule plan only; it cannot invent prices or issue trading instructions. When data-quality gates fail, manual analysis can still be invoked and the model must report the data limitations. Settings → Gold Board adds model selection, Analyze now and a separate Query logs panel.

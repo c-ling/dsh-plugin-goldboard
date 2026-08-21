@@ -431,6 +431,11 @@
   策略参数新增 `strategy.weaknessRsi`（默认 75）与 `strategy.weaknessShadowAtrMult`（默认 1.0）。
 - 响应返回脱敏后的完整配置。
 - `analysis.enabled=true` 时，保存前用 `ctx.llm.prepareCall()` 校验 provider/model/reasoning；不可用时返回稳定错误码，不静默替换模型。
+- **持久化分支（v1.6.0，plan-04）**：宿主挂载可写 settings provider 时，POST 改为
+  经 `settings.replace(namespace, …)` 写入 `settings.yaml` 的 goldboard namespace
+  （`config.json` 退役；路由本身保留——远程浏览器的 settingsScope 只读不可写，
+  仍需此写入口）；无 provider 或 provider 只读时保持经典 `config.json` 原样。
+  GET 在两种模式下都是 `runtime.config` 的只读脱敏投影。
 
 ### 8.3 `GET /dsh-plugin-goldboard/models`
 
@@ -531,7 +536,17 @@
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
-- Webhook secret 与 notify 插件一致：只写、读回空白 + `secretSet`。
+- **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
+  `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
+  - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像
+    （脱敏视图），保存按钮把草稿对快照做差分、合成一批嵌套路径 ops 走
+    `settings.mutate`（revision fencing 由框架处理；失败后重载镜像再试）；
+  - `unavailable` / 无 scope 服务：完整回落旧 GET/POST `/config` 流程
+    （远程浏览器因 settings RPC 仅限回环，恒为此态）；
+  - `loading`：显示加载中；无 provider 的宿主会永远停在 loading，3 秒超时自动回落。
+- Webhook secret：settings 模式下脱敏视图**不含** secret 字段，输入框恒为空、
+  「已配置」徽标来自镜像行的 `secrets: [{path, set}]` 边车，「清除」在保存时下发
+  嵌套 `unset`；明文永不回显。fallback 模式保持旧 `secretSet` 占位写法。
 - 按钮使用 `--dsw-alias-button-primary-fill / hover`；卡片透明 + `border-l2`；开关用 `state-business-primary`；不得硬编码颜色。
 - 双语字典 `DICT.zh` / `DICT.en` 必须 1:1 键集合，测试断言。
 
@@ -547,10 +562,17 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| `config.json` | 脱敏前配置；原子写（tmp + rename），并发写串行化 |
+| `$DSH_HOME/settings.yaml`（goldboard namespace） | **v1.6.0 起的配置主存储（plan-04）**：宿主挂载 settings provider 时，全部配置节经 `installSettingsSection` 注册为 namespace `dsh-plugin-goldboard`，分层为 schema 默认 → cordis entry config（base）→ 用户文档；写入带 revision fencing，secret 字段 `role('secret')` 由 wire 层统一脱敏 |
+| `config.json` | **仅 fallback**（无 settings provider 或 provider 只读）时的脱敏前配置存储；原子写（tmp + rename），并发写串行化。升级首次启动检测到该文件时一次性迁移进 settings namespace 并改名为 `config.json.migrated` 保留（不删除，便于回滚）；namespace 已有用户层时只归档不覆盖 |
 | `state.json` | 行情缓存、bars 缓存、指标状态、提醒状态机、来源熔断状态；v1.5.0 起另含信号道状态（`laneState`）、CMB 价差采样（`cmbSpreadSamples`，容量 512 / TTL 6h）与每日内外盘价差史（`premiumHistory` ≤60 条 + 当日样本） |
 | `alerts-log.json` | 最近 200 条已发提醒（时间、action、价格）；`sentTo` 自 v1.5.0 记录真实渠道结果数组 `[{ channel, ok, error? }]`，替代此前恒为 `[null]` 的占位 |
 | `api-log.jsonl` | 最近 API 调用记录（JSONL，超 2MB 轮转为 `.1`，仅保留一代） |
+
+- **plan-04 边界（v1.6.0）**：`pollMs`、`directory` 等激活期参数仍走 cordis.patch.yml /
+  entry config，不入 settings namespace；bars/state/api-log/analysis-log 等非配置数据
+  继续留在 `storages/dsh-plugin-goldboard/`（大状态与二进制不进 settings）。
+- 迁移语义：迁移写入的是 normalize 后的完整配置（含当时默认值），此后代码默认值变更
+  不影响已迁移用户层——需要回到新默认时在设置页重置该项（unset 后回落 base/默认）。
 
 - 读取损坏时 log warning 并回退默认值，GET 不抛错。
 - Webhook secret 永不进入 snapshot、bars、日志。

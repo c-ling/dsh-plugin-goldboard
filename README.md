@@ -14,20 +14,20 @@ DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起
 从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
 或使用已有的 `dsh` 命令：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
 pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
 > `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
@@ -69,12 +69,12 @@ curl -s 'http://127.0.0.1:3080/dsh-plugin-goldboard/analysis-logs?limit=30'
 ## 更新
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.5.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.6.0"
 ```
 
-用新的 `#v1.5.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
+用新的 `#v1.6.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
 ## 卸载
@@ -100,6 +100,7 @@ corepack pnpm remove dsh-plugin-goldboard
 - 挂单跟踪：插件会记住最近一次已提醒的委托建议；若后续信号变化导致原建议失效（转为等待/休市/数据不足/止损等）或委托方向/价格/克数发生变化，会额外发送“撤销原挂单/挂单已更新”提醒，避免按旧挂单执行不该做的操作。
 - 提醒：宿主机系统通知（macOS/Linux/Windows）+ 飞书/钉钉/企业微信/通用 Webhook；无冷却、无勿扰，交易时段内每次阈值穿越都提醒。另含两类保护性提示：持仓且 5 分钟 RSI 超买（默认 >75）并伴随阴线吞没或长上影线时的走弱减仓提醒（`sell_weakness`，参数可调），以及内外盘价差偏离近 60 日均值 ±2σ（样本 ≥20 天，population σ）时的异常提示（`spread_alert`，仅提示不开仓）。提醒日志记录每个渠道的实际送达结果。
 - 交易时段：工作日 09:00–次日 02:00，节假日可编辑。
+- 配置存储（v1.6.0）：配置迁移到 Harness 统一设置（`$DSH_HOME/settings.yaml` 的 `dsh-plugin-goldboard` namespace），保存后立即生效、刷新与重启均保留；旧版 `config.json` 在升级后首次启动自动迁移并保留为 `config.json.migrated` 备份；无 settings 服务的环境自动回落原存储，功能不变。Webhook 签名密钥只写不回显，页面仅显示「已配置」徽标。
 - 中英文 UI，跟随「设置 → 通用 → 语言」；明暗主题使用 DSW 设计变量。
 - 技术口径审计：报价带 `instrument`、`market`、`currency`、`unit` 和来源质量元数据；XAU/USD 现货与 Yahoo `GC=F` 黄金期货分开，轮询和汇率推导 K 线明确标记 `synthetic`；正式指标只使用已收盘 K 线，并输出 `calculationVersion`、`warmupReady` 与固定的 Wilder 平滑方法。提供固定行情回放接口：`POST /dsh-plugin-goldboard/replay`。
 - 模型分析（手动触发）：从 Harness 当前可用的 provider/model 目录选择模型和 reasoning effort，不改变当前会话模型；模型只解释宿主指标和规则 plan，不能补造价格或生成买卖指令。即使数据质量门控未通过也可手动调用，模型需以数据不足/过期/无效等状态说明限制。设置页的「模型与分析」区域提供目录选择、「立即分析」和独立「查询日志」面板。
