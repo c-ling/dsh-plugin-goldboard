@@ -230,7 +230,8 @@
 - 休市期间：报价看板继续显示最后价，但**抑制所有买入/卖出提醒**；数据过期 > 15 分钟（`STALE_QUOTE_MS`）触发一次 `data_stale` 提醒。
 - 招行积存金价格：
   - 优先：`https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center` 返回 `zBuyPrc`（客户买入价）/ `zSelPrc`（客户卖出价）；折线图使用客户买入价绘制，`average = (zBuyPrc + zSelPrc) / 2` 仅作兼容保留。
-  - 回退：`cmbBuy ≈ 国际金价按汇率折算 + cmb.buySpreadPerGram`（默认 +1.72），`cmbSell ≈ 国际金价按汇率折算 + cmb.sellSpreadPerGram`（默认 +1.72）。
+  - 回退：`cmbBuy ≈ 基准价 + spreadOffset`、`cmbSell ≈ 基准价 + spreadOffset`（基准价为国际金价按汇率折算，缺失时回退 Au99.99）。`spreadOffset` 来源分两级（v1.5.0 动态校准，详见 §7.2）：
+    `dynamic-estimate`（6h 内实时中间价差采样 ≥30 条取中位数，夹在 `[0, 静态价差 × 3]`）→ `static`（静态配置值，冷启动兜底不变）。snapshot `derived.cmb.spreadSource ∈ {live, dynamic-estimate, static}` 与 `spreadSampleCount` 标注当前来源；设置页招行卡片同步展示。
   - 看板标注“招行价以 App 为准”。
   - 招行“昨收/涨跌幅”优先取当天 00:00 的自身 1 分钟价格；若 00:00 无数据，则降级为国际金价昨收折算人民币 + 当前招行价差估算。
 
@@ -253,6 +254,11 @@
 
 - 配置默认：`fee.buyPerGram = 0`，`fee.sellPerGram = 5`（双边合计 5，可调，设置页显示总额与回本线预览）。
 - 招行价差：`cmb.buySpreadPerGram = 1.72`、`cmb.sellSpreadPerGram = 1.72`（可调，可负）。
+- **动态价差校准（v1.5.0）**：招行实时报价有效期间，按 ≥60s 间隔采样
+  `{ t, spreadMid = (zBuyPrc + zSelPrc)/2 − xauCnyPerGram }` 入 `state.cmbSpreadSamples`
+  （容量 512、单条 TTL 6h）。兜底估算时：有效样本 ≥30 → `spreadOffset = median(窗口内样本)`
+  夹在 `[0, 静态价差 × 3]`，买卖两侧共用该中间价口径的偏移；样本不足 → 沿用静态配置值。
+  来源与样本数通过 snapshot `derived.cmb.spreadSource/spreadSampleCount` 透出。
 - 新开仓回本价（按招行估算价口径）：
   `breakevenCmb = cmbBuyPrice + buyFee + sellFee + estimatedSpread + slippage`
   其中 `estimatedSpread` 用近期买卖价差中位数（Au99.99 盘口，缺失时默认 0.2 元/克），`slippage` 默认 0.2 元/克（可配置）。
@@ -272,6 +278,16 @@
 - **开盘后 1 小时内与每天 0 点-1 点期间的放宽**：30/60 分钟窗口在开盘初期或跨日 0-1 点时段天然不足（60 分钟窗口约需累积 37 个分钟点才 >60%），因此开盘后 1 小时内、以及每天北京时间 0 点-1 点期间，只校验 **5/10 分钟**窗口；数据参考仍尽量覆盖 5/10/30/60（指标照常按四个周期计算，10/30/60 分钟线有历史预热时趋势过滤不受影响）。`dataCoverage` 仍报告全部四个窗口，仅 `reasonCodes`/拦截按生效窗口输出。
 - 门槛不替代过期检查：报价过期仍走 `data_stale`；休市仍走 `market_closed`。
 - 覆盖率的其余预期后果：轮询间隔 > 60s 或报价中断会按缺口如实反映（5 分钟窗口缺 1 分钟即 80% 不达标）。
+
+**信号道粘滞（v1.5.0）**
+
+- 信号道优先级固定为 **招行实时 → 国际金价折算 → Au99.99**；切换不再按单次可用性即时决定：
+  - **降级切换**：当前道连续 ≥ `LANE_SWITCH_TICKS = 3`（≈90s @30s 轮询）不可用才切到下一优先可用道；
+  - **回升切换**：更高优先道恢复连续 ≥ `LANE_RECOVER_TICKS = 3` 才切回；
+  - 等待期间 plan 附 `reasonCodes: signal_lane_degraded`，指标与建议价仍按当前道最后数据计算；
+  - 切换瞬间发送一次性 `lane_switched` 提醒（仅降级方向，回升静默，看板 `plan.signalLane` 始终显示当前道）；
+  - 道变更时确认 streak（confirmBars 时钟）全部清零重新计数；
+  - 休市期间不评估切换；手动 replay 无粘滞状态，按输入直接决议。
 
 **无持仓（日内做多）**
 
@@ -303,9 +319,27 @@
 | 距当日交易时段结束 < 30 分钟仍持仓 | `close_by_session_end`：日内了结提醒（不自动计算价格） |
 | RSI14 > 75 且 5 分钟出现阴线吞没/上影 > ATR | `sell_weakness`：减仓参考 |
 
-**国际价确认**
+**sell_weakness（v1.5.0 实现，持仓减仓参考，不要求浮盈）**
 
-- 当 Au99.99 与 XAU 折算价的价差超过近 20 日价差均值 ± 2σ 时，输出 `spread_alert`，仅提示“内外盘异常”，不直接开仓。
+全部条件基于**已收盘的 5 分钟 bar**：
+
+1. 有持仓；
+2. `rsi14(5m) > strategy.weaknessRsi`（新增配置，默认 75）；
+3. 最后一根收盘 bar 为**阴线吞没**（实体完全覆盖前一根阳线实体），或**上影线长度 > `atr14 × strategy.weaknessShadowAtrMult`**（新增配置，默认 1.0）。
+
+输出：`action = sell_weakness` + 减仓克数沿用目标仓位区间逐级减仓并保留最小底仓
+（与 `reduce_position` / `sell_trailing` 同一 sizing）；reasonCodes 附
+`weakness_rsi_overbought` 与 `bearish_engulfing` / `long_upper_shadow`；走既有边沿告警状态机。
+
+**国际价确认 / spread_alert（v1.5.0 实现）**
+
+- state 维护 `premiumHistory`：每日一条 `{ date, premiumPerGram }`（当日 domesticPremiumPerGram
+  开盘期间样本的滚动中位数；上限 60 条滚动持久化）。
+- 已完成日样本 ≥20 天时计算 population mean/σ（与布林口径一致）：|当日值 − mean| > 2σ →
+  边沿告警 `spread_alert`（仅提示“内外盘异常”，不直接开仓、不改 plan.action）；按北京日期
+  抑制，次日自动重新武装。
+- 样本不足时不下发告警，仅在 snapshot `quality.warnings` 提示 `premium_history_accumulating`，
+  并在 `derived.premium` 透出 `{ today, sampleDays, minDays, mean?, sigma?, deviationSigma? }`。
 
 ### 7.4 建议委托单（手动执行）
 
@@ -344,6 +378,9 @@
 
 统一响应信封：`{ ok: true, ... }` 或 `{ ok: false, error: { code, message?, details? } }`。
 每个路径只注册一次，内部按 `req.method` 分发；请求体读入设 256 KiB 上限（413）。
+所有 handler 外层统一包一层安全网（v1.5.0）：异常逃逸内部错误映射时回
+`500 { ok:false, error:{ code:"INTERNAL_ERROR", message: 脱敏摘要 } }`（不带堆栈），
+保证任何失败路径都有 JSON 信封而非宿主的裸 400。
 
 ### 8.1 `GET /dsh-plugin-goldboard/config`
 
@@ -383,8 +420,15 @@
 
 规则：
 
-- 空字符串 secret = 保留旧值；非空 = 替换；`clearSecrets` 列出的 = 清空。
-- 校验：手续费默认 `buyPerGram=0, sellPerGram=5`（总额 5，允许用户改，但设置页给出成本影响提示）；招行价差允许负值；克数与金额非负、上限 ≤ 100000 克、成本价 > 0。
+- **深合并（v1.5.0 起，破坏·轻）**：payload 按顶层节白名单（fee / cmb / position / limits /
+  manualPrevClose / strategy / tradingHours / analysis / system / webhooks）做字段级递归合并——
+  只改 payload 携带的节与字段，未携带的节保持原值（如只传 `webhooks.feishu` 不再重置
+  dingtalk/wecom/generic）；`position.lots`、`webhooks.generic`、`tradingHours.holidays`
+  等数组整体替换；未知顶层键返回 `400 UNKNOWN_CONFIG_KEY`。此前「传部分顶层节会重置其余节」
+  的行为被修正，依赖旧行为的外部脚本需注意。
+- 空字符串 secret = 保留旧值；非空 = 替换；`clearSecrets` 列出的 = 清空（语义不变）。
+- 校验：手续费默认 `buyPerGram=0, sellPerGram=5`（总额 5，允许用户改，但设置页给出成本影响提示）；招行价差允许负值；克数与金额非负、上限 ≤ 100000 克、成本价 > 0；
+  策略参数新增 `strategy.weaknessRsi`（默认 75）与 `strategy.weaknessShadowAtrMult`（默认 1.0）。
 - 响应返回脱敏后的完整配置。
 - `analysis.enabled=true` 时，保存前用 `ctx.llm.prepareCall()` 校验 provider/model/reasoning；不可用时返回稳定错误码，不静默替换模型。
 
@@ -504,8 +548,8 @@
 | 文件 | 内容 |
 | --- | --- |
 | `config.json` | 脱敏前配置；原子写（tmp + rename），并发写串行化 |
-| `state.json` | 行情缓存、bars 缓存、指标状态、提醒状态机、来源熔断状态 |
-| `alerts-log.json` | 最近 200 条已发提醒（时间、action、价格、渠道、结果） |
+| `state.json` | 行情缓存、bars 缓存、指标状态、提醒状态机、来源熔断状态；v1.5.0 起另含信号道状态（`laneState`）、CMB 价差采样（`cmbSpreadSamples`，容量 512 / TTL 6h）与每日内外盘价差史（`premiumHistory` ≤60 条 + 当日样本） |
+| `alerts-log.json` | 最近 200 条已发提醒（时间、action、价格）；`sentTo` 自 v1.5.0 记录真实渠道结果数组 `[{ channel, ok, error? }]`，替代此前恒为 `[null]` 的占位 |
 | `api-log.jsonl` | 最近 API 调用记录（JSONL，超 2MB 轮转为 `.1`，仅保留一代） |
 
 - 读取损坏时 log warning 并回退默认值，GET 不抛错。
@@ -519,6 +563,9 @@
   重启后由报价轮询自建 + K 线补齐。
 - **localeHint 不再持久化（v1.4.0·轻微行为变化）**：通知文案语言提示仅存内存，
   重启后回到 zh 默认；此前每次语言翻转都触发一次全量 state.json 写盘。
+- **信号道与统计状态持久化（v1.5.0）**：`laneState`（当前道 / 待切道 / 连续计数）随
+  state.json 保留，重启不丢粘滞计数；`cmbSpreadSamples`、`premiumHistory`、
+  `premiumDaySamples` 同样落盘，动态价差与 spread_alert 统计跨重启连续。
 
 ---
 
