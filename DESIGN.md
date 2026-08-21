@@ -206,10 +206,16 @@
 
 ### 6.3 采集规则
 
-- 报价轮询 30s（可配置 15–120s）；K 线增量每 5 分钟补齐一次。
-- 每源独立超时（5s）、重试（指数退避 2s/4s/8s，最多 3 次）、熔断（连续 3 次失败停用 10 分钟）。
-- 单源失败用上一快照 + `stale: true` + 来源标记，不中断看板。
-- 磁盘缓存所有原始响应与最近 bars；宿主重启后先读缓存再补增量。
+- 报价轮询 30s（可配置 10–300s）；K 线增量每 5 分钟补齐一次。
+- **链路预算（v1.4.0）**：每条 fallback 链（国内 / XAU / USDCNY / CMB 三传输）共享一个
+  `QUOTE_CHAIN_BUDGET_MS = 12s` 的总预算；链内单源超时 = `clamp(剩余预算 ÷ 剩余源数, 3.5s, 6s)`，
+  预算耗尽即跳过余下源；任一源成功或整链穷尽时 abort 该链全部在途请求（`AbortController` 贯穿
+  header + body 全程）。此前各源独立叠加 6s 超时，最坏可阻塞一个 tick 约 24–42s。
+- 每源熔断：连续 3 次失败停用 10 分钟。不做指数退避重试——故障隔离由熔断承担，失败直接落到下一源。
+- 单源失败用上一快照 + `stale: true` + 来源标记，不中断看板；国内源报价时间戳超过
+  `STALE_QUOTE_MS = 15min` 视为 stale，不再接受为有效 tick。
+- **api-log 轮转与尾读（v1.4.0）**：`api-log.jsonl` 超过 `API_LOG_MAX_BYTES = 2MB` 时轮转为
+  `.1`（仅保留一代）；读取（含启动加载）只读文件末尾 256KB 并丢弃撕裂的首行，取末 500 条。
 - **bars 种子版本失效机制（v1.3.1）**：`state.json` 记录 `barsSeedVersion`（当前 `BARS_SEED_VERSION = 2`）。加载时若字段缺失或 ≠ 当前值，丢弃 AU9999 / XAU 两道的 `bars[5]` 与 `bars[60]`（其余周期与 lane 保留），下一次 tick 由修复后的种子逻辑重建，并回写新版本号——用于旧版本污染数据（v1.2.x 曾用末根子 bar 整体覆盖 60 分钟桶）的一次性清理。
 - 不做高频轮询，遵守免费源非官方接口的容忍度；接口变更时必须降级而不是崩溃。
 
@@ -221,7 +227,7 @@
   - 实际执行以招行 App 交易规则为准；插件时段表只是提醒开关，不代替银行规则。
 - 行情源 Au99.99 与 XAU 的报价仍持续采集，但 `marketState` 决定是否允许开平仓提醒。
 - `marketState` 写入 snapshot：`open / closed`；`open` 表示招行积存金当前可交易。
-- 休市期间：报价看板继续显示最后价，但**抑制所有买入/卖出提醒**；数据过期 > 10 分钟触发一次 `data_stale` 提醒。
+- 休市期间：报价看板继续显示最后价，但**抑制所有买入/卖出提醒**；数据过期 > 15 分钟（`STALE_QUOTE_MS`）触发一次 `data_stale` 提醒。
 - 招行积存金价格：
   - 优先：`https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center` 返回 `zBuyPrc`（客户买入价）/ `zSelPrc`（客户卖出价）；折线图使用客户买入价绘制，`average = (zBuyPrc + zSelPrc) / 2` 仅作兼容保留。
   - 回退：`cmbBuy ≈ 国际金价按汇率折算 + cmb.buySpreadPerGram`（默认 +1.72），`cmbSell ≈ 国际金价按汇率折算 + cmb.sellSpreadPerGram`（默认 +1.72）。
@@ -429,18 +435,21 @@
   },
   "indicators": { "AU9999_5m": { "rsi14": 46.2, "ema20": 949.8, "upper": 953.1, "lower": 946.6 } },
   "position": { "grams": 20, "avgCostPerGram": 945.0, "marketValue": 19000, "feeAdjustedPnl": 87.0, "lots": [{ "id": "lot-1", "grams": 20, "price": 945.0 }] },
-  "plan": { "action": "sell_take_profit", "dataCoverage": { "5": 1, "10": 1, "30": 1, "60": 0.98 }, "suggestedOrder": { "...": "..." } },
-  "alerts": { "lastFiredAt": { "sell_take_profit": "..." } }
+  "plan": { "action": "sell_take_profit", "dataCoverage": { "5": 1, "10": 1, "30": 1, "60": 0.98 }, "suggestedOrder": { "...": "..." } }
 }
 ```
 
 - snapshot 不落任何 secret。
 - `plan.action = data_incomplete` 时 `suggestedOrder = null`，`dataCoverage` 给出 5/10/30/60 分钟各窗口的每分钟数据覆盖率（信号标的口径）。
+- **缓存与瘦身（v1.4.0）**：距上次构建 < `SNAPSHOT_REBUILD_MIN_MS = 2s` 的重复 GET 直接返回缓存对象
+  （tick 每 30s 本就在重建）；`trend.*_1m` 每条上限 `TREND_POINTS = 1080` 根（单交易时段最长 1020 分钟 + 余量），
+  且只保留 `{ t, o, h, l, c }`（逐 bar 的 source/instrument 等元数据在单道内恒同，属纯重复；
+  完整元数据仍可经 `/bars` 获取）。典型负载（AU9999/XAU/CMB 三道满载）≈240KB。
 - 客户端只消费此结构，具体指标增减在实现阶段冻结。
 
-### 8.9 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1m&limit=120`
+### 8.9 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1&limit=120`
 
-- 参数白名单校验；返回该标的最近 bars，供展开浮窗时补充历史。
+- 参数白名单校验；`interval` 为**数字分钟数**（1 / 5 / 15 / 60 / 1440），返回该标的最近 bars，供展开浮窗时补充历史。
 
 ### 8.10 `POST /dsh-plugin-goldboard/test-notify`
 
@@ -497,10 +506,19 @@
 | `config.json` | 脱敏前配置；原子写（tmp + rename），并发写串行化 |
 | `state.json` | 行情缓存、bars 缓存、指标状态、提醒状态机、来源熔断状态 |
 | `alerts-log.json` | 最近 200 条已发提醒（时间、action、价格、渠道、结果） |
+| `api-log.jsonl` | 最近 API 调用记录（JSONL，超 2MB 轮转为 `.1`，仅保留一代） |
 
 - 读取损坏时 log warning 并回退默认值，GET 不抛错。
 - Webhook secret 永不进入 snapshot、bars、日志。
 - 宿主退出后缓存保留；重启先读 `state.json` 再补增量。
+- **分区写盘节奏（v1.4.0）**：state.json 仍是单文件，但按分区脏标记差异化落盘——
+  `bars`（体积主体）脏标记后最短间隔 `STATE_BARS_FLUSH_MS = 5min` 才写一次，
+  且锚定整分钟边界（最新 1m 桶滚动后）；其余 KB 级字段（quotes / alertState /
+  signalState / lastSuggestedOrder / lastAlertLog）脏即写。dispose 时执行可等待的
+  最终 flush（cordis 支持异步 disposer）。崩溃窗口最多丢约 5 分钟合成 1m bar，
+  重启后由报价轮询自建 + K 线补齐。
+- **localeHint 不再持久化（v1.4.0·轻微行为变化）**：通知文案语言提示仅存内存，
+  重启后回到 zh 默认；此前每次语言翻转都触发一次全量 state.json 写盘。
 
 ---
 
@@ -515,8 +533,9 @@
   - 飞书/钉钉签名逻辑复用 `dsh-plugin-notify` 已验证实现；
   - 企业微信自定义机器人；
   - 通用 JSON webhook（Slack / ntfy / Bark / Server酱等）。
-- 消息模板占位符：`{{action}} {{instrument}} {{price}} {{target}} {{grams}} {{time}} {{reason}}`。
-- 模板默认中文（用户可改）；客户端会把当前 UI locale 作为 `X-DSH-Locale` 附加到 snapshot 请求，宿主记录为通知文案语言提示，不另设语言偏好设置项。
+- 消息模板占位符：`{{action}} {{instrument}} {{price}} {{cmbPrice}} {{suggestedPrice}} {{target}} {{grams}} {{time}}`
+  （未提供的占位符渲染为空串）。
+- 模板默认中文（用户可改）；客户端会把当前 UI locale 作为 `X-DSH-Locale` 附加到 snapshot 请求，宿主记录为通知文案语言提示（仅内存，重启回 zh 默认），不另设语言偏好设置项。
 
 ---
 
@@ -524,7 +543,7 @@
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| 免费源限流/失效（实测东财连续请求已出现 Empty reply） | 行情中断 | 三源容错、30s 低频、指数退避、熔断、磁盘缓存、stale 标记 |
+| 免费源限流/失效（实测东财连续请求已出现 Empty reply） | 行情中断 | 多源容错、30s 低频、链路预算（12s/链）、熔断、stale 标记 |
 | 免费源字段/缩放变化 | 价格错误 | 解析器带字段版本 + 单位测试样本；异常值校验（与前值偏差 > 3% 丢弃） |
 | 免费源无官方授权 | 合规风险 | 仅个人看板使用；不对外分发；后续可替换为付费源 |
 | 手续费 5 元/克双边合计（买 0 卖 5）下，短线波动不足以覆盖成本 | 用户亏损 | 只输出“建议”，始终显示回本价；波动不足时不发开仓信号 |

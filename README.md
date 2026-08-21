@@ -14,20 +14,20 @@ DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起
 从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.3.1"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.4.0"
 ```
 
 或使用已有的 `dsh` 命令：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.3.1"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.4.0"
 ```
 
 pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.3.1"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.4.0"
 ```
 
 > `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
@@ -69,12 +69,12 @@ curl -s 'http://127.0.0.1:3080/dsh-plugin-goldboard/analysis-logs?limit=30'
 ## 更新
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.3.1"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.3.1"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.3.1"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.4.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.4.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.4.0"
 ```
 
-用新的 `#v1.3.1` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
+用新的 `#v1.4.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
 ## 卸载

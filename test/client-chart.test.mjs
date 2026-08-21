@@ -9,7 +9,7 @@ import test from "node:test";
 const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
 
 function loadChartHelpers() {
-  const startMarker = "/** Format an ISO timestamp as Beijing wall-clock time (Asia/Shanghai). */";
+  const startMarker = "// ── Beijing wall-clock formatting (hoisted formatter + bounded memo) ──";
   const endMarker = "var REASON_LABELS";
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker);

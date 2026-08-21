@@ -401,3 +401,29 @@ test("analysis log sanitization removes secrets and URL query credentials", () =
   assert.doesNotMatch(error.message, /secret|BearerSecret/);
   assert.match(error.message, /\[redacted\]/);
 });
+
+test("analysis cache evicts oldest entries beyond the 32-entry bound", async (t) => {
+  const { store } = await tempStore(t);
+  const llm = fakeLlm(validOutput());
+  // Distinct snapshots per run -> distinct input hashes -> distinct cache keys
+  // (the key includes the latest price), reproducing the every-tick growth.
+  let price = 900;
+  const module = new AnalysisModule({
+    llm,
+    getContext: async () => {
+      price += 1;
+      const snapshot = readySnapshot();
+      snapshot.quotes.AU9999.price = price;
+      return { snapshot, bars: { XAU: { "5m": [] } } };
+    },
+    getConfig: analysisConfig,
+    logStore: store,
+  });
+
+  for (let i = 0; i < 40; i += 1) {
+    const response = await module.run({ force: true });
+    assert.equal(response.ok, true);
+  }
+  assert.ok(module.cache.size <= 32, `cache bounded, size=${module.cache.size}`);
+  assert.equal(llm.calls, 40, "forced runs always reach the model");
+});

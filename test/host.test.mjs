@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   BARS_SEED_VERSION,
   DEFAULT_CONFIG,
+  __setFetchImpl,
+  __setQuoteChainTiming,
   aggregateSubBars,
+  apply,
   applyManualCmbMinuteBars,
   applySignalPolicy,
   atr,
   bollinger,
+  buildSessionCalendar,
   listMissingCmbMinuteSlots,
   buildAlertMessage,
     buildOrderChangeMessage,
@@ -20,6 +27,9 @@ import {
   computePlan,
   coverageGate,
   defaultSignalState,
+  fetchDomesticQuote,
+  isOpenMinute,
+  markSourceSuccess,
   mergeSecrets,
   mergeKlines,
   migrateBarsSeedVersion,
@@ -39,11 +49,14 @@ import {
   parseTencentXauQuote,
   parseYahooFinanceKlines,
   parseYahooFinanceQuote,
+  readApiLogsFromFile,
   redactConfig,
   resampleBars,
+  rotateApiLogIfNeeded,
   rsi,
   seedBars,
   sma,
+  snapshotCacheStale,
   windowCoverage,
 } from "../lib/index.js";
 
@@ -1607,4 +1620,276 @@ test("applySignalPolicy keeps sell-side counting independent of the buy clock", 
   assert.equal(sell.signalState.sellStreak, 1, "sell side counts its own bar clock");
   assert.equal(sell.signalState.lastBarT.buy, BAR_T1, "buy clock untouched");
   assert.equal(sell.signalState.lastBarT.sell, BAR_T0);
+});
+
+// ── plan-02: performance & resource ────────────────────────────────────────
+
+/** Beijing wall-clock "YYYY-MM-DD HH:MM:SS" for a fresh timestamp (SGE `times` field). */
+function beijingNowString(now = new Date()) {
+  const iso = new Date(now.getTime() + 8 * 60 * 60 * 1000).toISOString();
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)}`;
+}
+
+test("rotateApiLogIfNeeded rotates oversized logs and keeps one generation", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-apilog-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, "api-log.jsonl");
+
+  // Small file below the threshold: no rotation.
+  await writeFile(file, "{\"id\":1}\n", "utf8");
+  assert.equal(await rotateApiLogIfNeeded(file, 1024), false);
+  assert.equal(await readFile(file, "utf8"), "{\"id\":1}\n");
+
+  // Oversized file: renamed to `.1`, original gone, previous `.1` overwritten.
+  await rm(`${file}.1`, { force: true });
+  await writeFile(`${file}.1`, "old generation\n", "utf8");
+  await writeFile(file, "x".repeat(2048), "utf8");
+  assert.equal(await rotateApiLogIfNeeded(file, 1024), true);
+  assert.equal(await readFile(`${file}.1`, "utf8"), "x".repeat(2048));
+  await assert.rejects(() => readFile(file), { code: "ENOENT" });
+
+  // Missing file: a no-op, not a throw.
+  assert.equal(await rotateApiLogIfNeeded(file, 1024), false);
+});
+
+test("readApiLogsFromFile tail-reads large logs and tolerates a torn first line", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-apilog-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, "api-log.jsonl");
+
+  // A torn head line (as if the tail window started mid-JSON) followed by
+  // 600 padded entries (~300KB total > the 256KB tail window).
+  let body = '{"torn": tru';
+  for (let i = 0; i < 600; i += 1) {
+    body += `\n${JSON.stringify({ id: i, ok: true, url: `https://example.com/${i}`.padEnd(420, "a") })}`;
+  }
+  await writeFile(file, body, "utf8");
+
+  const logs = await readApiLogsFromFile(file);
+  assert.equal(logs.length, 500, "capped at MAX_API_LOGS");
+  assert.equal(logs[0].id, 599, "newest first");
+  assert.equal(logs[499].id, 100, "oldest kept entry");
+});
+
+test("readApiLogsFromFile keeps small-file behaviour", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-apilog-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = join(dir, "api-log.jsonl");
+
+  await writeFile(file, '{"id":1}\nnot json\n\n{"id":2}\n', "utf8");
+  const logs = await readApiLogsFromFile(file);
+  assert.deepEqual(logs.map((entry) => entry.id), [2, 1], "malformed/blank lines skipped, newest first");
+
+  assert.deepEqual(await readApiLogsFromFile(join(dir, "missing.jsonl")), []);
+});
+
+function hangingFetch(calls) {
+  return function (url, options = {}) {
+    const entry = { url: String(url), signal: options.signal, aborted: Boolean(options.signal?.aborted) };
+    calls.push(entry);
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        entry.aborted = true;
+        reject(new Error("aborted"));
+      };
+      if (options.signal?.aborted) {
+        onAbort();
+        return;
+      }
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  };
+}
+
+const CHAIN_SOURCE_IDS = ["sina-domestic", "sge-domestic", "eastmoney-domestic", "sixty-domestic"];
+
+test("quote chain budget bounds total latency and aborts in-flight requests", async () => {
+  const calls = [];
+  const previousFetch = __setFetchImpl(hangingFetch(calls));
+  const previousTiming = __setQuoteChainTiming({ budgetMs: 600, minSourceTimeoutMs: 120 });
+  for (const id of CHAIN_SOURCE_IDS) markSourceSuccess(id);
+  try {
+    const startedAt = Date.now();
+    const quote = await fetchDomesticQuote(new Date());
+    const elapsed = Date.now() - startedAt;
+    assert.equal(quote, null, "all sources hang -> no quote");
+    assert.ok(elapsed < 2000, `chain bounded by budget+slack, took ${elapsed}ms`);
+    assert.ok(calls.length >= 2, `several sources attempted (${calls.length})`);
+    assert.ok(calls.every((entry) => entry.aborted), "no request left dangling after the chain settled");
+  } finally {
+    __setFetchImpl(previousFetch);
+    __setQuoteChainTiming(previousTiming);
+    for (const id of CHAIN_SOURCE_IDS) markSourceSuccess(id);
+  }
+});
+
+test("quote chain stops at the first successful source and skips the rest", async () => {
+  const urls = [];
+  const sgePayload = JSON.stringify({
+    times: beijingNowString(),
+    data: [["Au99.99", "950.00", "946.00", "954.50", "946.00", "940.72"]],
+  });
+  const previousFetch = __setFetchImpl(async (url) => {
+    urls.push(String(url));
+    if (String(url).includes("hq.sinajs.cn")) throw new Error("sina down");
+    if (String(url).includes("sge.com.cn")) {
+      return { ok: true, text: async () => sgePayload };
+    }
+    throw new Error("source after the successful one must not be called");
+  });
+  const previousTiming = __setQuoteChainTiming({ budgetMs: 600, minSourceTimeoutMs: 120 });
+  for (const id of CHAIN_SOURCE_IDS) markSourceSuccess(id);
+  try {
+    const quote = await fetchDomesticQuote(new Date());
+    assert.equal(quote?.source, "sge");
+    assert.equal(urls.length, 2, "sina failed fast, SGE succeeded, later sources skipped");
+  } finally {
+    __setFetchImpl(previousFetch);
+    __setQuoteChainTiming(previousTiming);
+    for (const id of CHAIN_SOURCE_IDS) markSourceSuccess(id);
+  }
+});
+
+test("snapshot trend arrays are capped at TREND_POINTS (1080)", () => {
+  const now = Date.parse("2026-08-14T04:00:00Z"); // Beijing Friday 12:00
+  // Three full sessions (Mon–Wed, 09:00 → next-day 02:00 = 1020 open minutes
+  // each): 3060 in-session bars, so the 1080 cap — not the session filter —
+  // decides the payload size.
+  const bars = [];
+  for (let day = 0; day < 3; day += 1) {
+    const sessionStart = Date.parse(`2026-08-10T09:00:00+08:00`) + day * 24 * 60 * 60 * 1000;
+    for (let i = 0; i < 1020; i += 1) {
+      bars.push({ t: sessionStart + i * 60_000, o: 950, h: 951, l: 949, c: 950.5 });
+    }
+  }
+  const snap = buildSnapshot({
+    quotes: { AU9999: { price: 950.5, source: "test", updatedAt: now } },
+    bars: { AU9999: { 1: bars }, XAU: { 1: [] }, GCF: { 1: [] }, CMB: { 1: [] } },
+    plan: null,
+  }, normalizeConfig({}), new Date(now));
+  assert.equal(snap.trend.AU9999_1m.length, 1080);
+  // The newest bar is kept; older ones are dropped from the head.
+  assert.equal(snap.trend.AU9999_1m[1080 - 1].t, new Date(bars[bars.length - 1].t).toISOString());
+});
+
+test("snapshot cache decision honours the rebuild window with an injected clock", () => {
+  const now = 1_000_000;
+  assert.equal(snapshotCacheStale(now - 1_000, now), false, "fresh snapshot is served from cache");
+  assert.equal(snapshotCacheStale(now - 3_000, now), true, "snapshot older than 2s rebuilds");
+  assert.equal(snapshotCacheStale(undefined, now), true, "never-built snapshot rebuilds");
+  assert.equal(snapshotCacheStale(now - 5_000, now, 10_000), true === false ? true : false, "custom window respected");
+  assert.equal(snapshotCacheStale(now - 11_000, now, 10_000), true, "custom window expiry");
+});
+
+test("isOpenMinute accepts a prebuilt calendar and matches config behaviour", () => {
+  const config = normalizeConfig({
+    tradingHours: { open: "09:00", close: "26:00", weekdaysOnly: true, holidays: ["2026-10-01"] },
+  });
+  const calendar = buildSessionCalendar(config);
+
+  const beijing = (date, time) => Date.parse(`${date}T${time}:00+08:00`);
+  // Calendar vs config input stay equivalent across several days that cover
+  // cross-midnight tails, a holiday and a weekend.
+  const samples = [
+    beijing("2026-09-30", "10:00"), // Wednesday session
+    beijing("2026-10-01", "01:30"), // Tuesday-opened session's early-morning tail
+    beijing("2026-10-01", "02:30"), // daily close
+    beijing("2026-10-01", "10:00"), // holiday Thursday: closed all day
+    beijing("2026-10-02", "10:00"), // Friday: normal session
+    beijing("2026-10-03", "01:00"), // Saturday early tail of Friday's session
+    beijing("2026-10-03", "10:00"), // Saturday: weekend
+    beijing("2026-10-05", "01:00"), // Monday early hours: Sunday not tradeable
+    beijing("2026-10-05", "09:00"), // Monday open
+  ];
+  for (const timestamp of samples) {
+    assert.equal(isOpenMinute(calendar, timestamp), isOpenMinute(config, timestamp), `minute ${new Date(timestamp).toISOString()}`);
+  }
+
+  assert.equal(isOpenMinute(calendar, beijing("2026-10-01", "10:00")), false, "holiday excluded");
+  assert.equal(isOpenMinute(calendar, beijing("2026-10-03", "10:00")), false, "weekend excluded");
+  assert.equal(isOpenMinute(calendar, beijing("2026-10-02", "10:00")), true, "trading Friday open");
+  assert.equal(isOpenMinute(calendar, beijing("2026-10-03", "01:00")), true, "cross-midnight tail open");
+});
+
+test("buildSessionCalendar memoizes by config identity", () => {
+  const config = normalizeConfig({});
+  assert.equal(buildSessionCalendar(config), buildSessionCalendar(config), "same object -> same calendar");
+  assert.notEqual(buildSessionCalendar(config), buildSessionCalendar(normalizeConfig({})), "new object -> new calendar");
+
+  const defaults = buildSessionCalendar({});
+  assert.equal(defaults.openMin, 9 * 60);
+  assert.equal(defaults.closeMin, 26 * 60);
+  assert.equal(defaults.weekdaysOnly, true);
+  assert.ok(defaults.holidaySet instanceof Set);
+});
+
+test("steady-state 30 minutes throttle state.json writes to the 5-minute rhythm", { timeout: 30_000 }, async (t) => {
+  const { stat } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-state-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const sinaLine = 'var hq_str_gds_AU9999="951.50,0,949.10,952.00,954.50,946.00,12:00:00,940.72,946.00,2282,301.00,1.00,2026-08-14,沪金99";';
+  const previousFetch = __setFetchImpl(async (url) => {
+    if (String(url).includes("hq.sinajs.cn")) return { ok: true, arrayBuffer: async () => Buffer.from(sinaLine, "utf8"), text: async () => sinaLine };
+    throw new Error("source unavailable in test");
+  });
+  t.after(() => __setFetchImpl(previousFetch));
+
+  let capturedDispose;
+  const effects = [];
+  const ctx = {
+    logger: { warn: () => {} },
+    effect: (fn) => {
+      const dispose = fn();
+      if (typeof dispose === "function") effects.push(dispose);
+      capturedDispose = dispose;
+    },
+  };
+
+  // Freeze the clock at Beijing Friday 12:00 and drive the real interval.
+  const startMs = Date.parse("2026-08-14T04:00:00Z");
+  const clock = t.mock.timers;
+  clock.enable({ apis: ["Date", "setInterval"], now: startMs });
+
+  const stateFile = join(dir, "state.json");
+  // Flushes are ≥1 minute apart (minute-anchored), so sampling the file's
+  // mtime after each simulated minute counts committed writes reliably
+  // (fs.watch rename events are unreliable on macOS).
+  const writeTimes = new Set();
+  let lastMtime = -1;
+  const sampleWrite = async () => {
+    try {
+      const info = await stat(stateFile);
+      if (info.mtimeMs !== lastMtime) {
+        lastMtime = info.mtimeMs;
+        writeTimes.add(info.mtimeMs);
+      }
+    } catch {
+      // not written yet
+    }
+  };
+  const drain = async () => {
+    for (let i = 0; i < 25; i += 1) await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  };
+
+  const runtime = apply(ctx, { directory: dir, pollMs: 10_000 });
+  try {
+    await drain(); // init + first tick
+    await sampleWrite();
+    for (let minute = 1; minute <= 30; minute += 1) {
+      clock.tick(60_000);
+      await drain();
+      await sampleWrite();
+    }
+  } finally {
+    if (typeof capturedDispose === "function") await capturedDispose();
+    clock.reset();
+  }
+
+  // Expected: 1 write during init, then at most one bars flush per 5 minutes
+  // anchored to whole-minute boundaries (~6 more), plus the dispose final
+  // flush — well under the ~60 writes the old every-tick behaviour produced.
+  assert.ok(writeTimes.size >= 2, `at least init + one throttled flush (${writeTimes.size})`);
+  assert.ok(writeTimes.size <= 8, `writes bounded (${writeTimes.size} <= 8)`);
 });
