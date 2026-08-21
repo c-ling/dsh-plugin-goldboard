@@ -129,6 +129,8 @@
 │    GET      /dsh-plugin-goldboard/snapshot                                    │
 │    GET      /dsh-plugin-goldboard/bars?instrument=&interval=&limit=            │
 │    POST     /dsh-plugin-goldboard/replay                                      │
+│    GET      /dsh-plugin-goldboard/manual-cmb-missing                          │
+│    POST     /dsh-plugin-goldboard/manual-cmb-bars                             │
 │    POST     /dsh-plugin-goldboard/test-notify                                 │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -317,6 +319,7 @@
 
 - `validUntil` 取当前招行交易时段结束前 10 分钟，超时后建议自动失效。
 - 浏览器侧提供“一键复制委托文本”，文本中明确写“招行积存金估算价，以 App 实际报价为准”，不执行任何下单动作。
+- 宿主会记住最近一次已提醒的 `suggestedOrder`（持久化到 `state.json`）。当后续 `plan` 不再包含建议、或建议的方向/价格/克数发生变化时，发送 `cancel_order` / `order_updated` 提醒，提示用户撤销或更新未成交挂单，避免按旧建议执行。
 
 ### 7.5 提醒边沿触发（无冷却、无勿扰）
 
@@ -324,6 +327,7 @@
 - **不设时间冷却、不设勿扰时段**：交易时段内价格重新穿越阈值就再次立即提醒。
 - 休市期间条件不进入 `armed`；开盘后按开盘价重新评估。
 - 同一评估周期多条提醒合并为一条摘要（系统通知 + Webhook 各发一份），避免一个 tick 内轰炸。
+- 除常规买卖信号外，还额外跟踪最近一次委托建议；原建议失效或参数变化时，以 `cancel_order` / `order_updated` 边沿提醒。
 
 ---
 
@@ -382,8 +386,8 @@
 ### 8.4 `GET/POST /dsh-plugin-goldboard/analysis`
 
 - `GET` 返回当前 running 查询、最近结果和日志健康状态。
-- `POST` 读取宿主最新快照，执行质量门控、缓存/running 去重和 provider-neutral 模型调用。
-- 每个真实调用返回 `queryId`；`force=true` 只绕过缓存，不绕过 stale、coverage、warm-up 或品种口径门控。
+- `POST` 读取宿主最新快照，执行缓存/running 去重和 provider-neutral 模型调用；质量门控未通过时仍可调用，但模型不得返回 `analysis_ready`。
+- 每个真实调用返回 `queryId`；`force=true` 只绕过缓存，不绕过模型输出状态约束。
 
 ### 8.5 `GET /dsh-plugin-goldboard/analysis-logs`
 
@@ -393,7 +397,11 @@
 
 接收固定 `asOf`、quotes 和 bars，纯函数重建质量、指标、plan 与 snapshot；不请求行情源、不发提醒、不调用模型。
 
-### 8.7 `GET /dsh-plugin-goldboard/snapshot`
+### 8.7 `POST /dsh-plugin-goldboard/manual-cmb-bars`
+
+接收设置页手动录入的今日招行积存金分钟价（文本或 `entries` 数组），仅补充缺失的 1 分钟 bar，并从 1 分钟数据重建缺失的 5/15/60/1440 分钟桶；不会覆盖已有 bar。设置页通过 `GET /dsh-plugin-goldboard/manual-cmb-missing` 获取今日缺失分钟列表，便于直接填写价格。成功响应包含 `added`、`skipped` 和最新 `snapshot`。
+
+### 8.8 `GET /dsh-plugin-goldboard/snapshot`
 
 ```json
 {
@@ -427,11 +435,11 @@
 - `plan.action = data_incomplete` 时 `suggestedOrder = null`，`dataCoverage` 给出 5/10/30/60 分钟各窗口的每分钟数据覆盖率（信号标的口径）。
 - 客户端只消费此结构，具体指标增减在实现阶段冻结。
 
-### 8.8 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1m&limit=120`
+### 8.9 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1m&limit=120`
 
 - 参数白名单校验；返回该标的最近 bars，供展开浮窗时补充历史。
 
-### 8.9 `POST /dsh-plugin-goldboard/test-notify`
+### 8.10 `POST /dsh-plugin-goldboard/test-notify`
 
 - 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用），用于设置页验证。
 

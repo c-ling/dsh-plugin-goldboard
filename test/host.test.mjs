@@ -4,9 +4,13 @@ import test from "node:test";
 
 import {
   DEFAULT_CONFIG,
+  applyManualCmbMinuteBars,
   atr,
   bollinger,
+  listMissingCmbMinuteSlots,
   buildAlertMessage,
+    buildOrderChangeMessage,
+    sameSuggestedOrder,
   buildSnapshot,
   computeMarketState,
   computeNextMarketOpen,
@@ -15,6 +19,7 @@ import {
   mergeSecrets,
   normalizeConfig,
   parseCmbMarketCenterQuote,
+  parseManualCmbMinuteEntries,
   parseEastmoneyKlines,
   parseGoldApiQuote,
   parseGoldPriceTodayQuote,
@@ -96,6 +101,51 @@ test("manual prev close overrides are normalized and applied to snapshots", () =
   assert.equal(snap.quotes.XAU.prevClose, 4567.89);
   assert.equal(snap.manualPrevClose.CMB, 888.88);
 });
+
+test("manual CMB minute entries are parsed and applied without overwriting existing bars", () => {
+  const now = new Date("2026-08-14T01:05:00Z"); // Beijing 09:05 Friday
+  const parsed = parseManualCmbMinuteEntries("09:00 950.00\n09:01 950.10\nbad line", now);
+  assert.equal(parsed.entries.length, 2);
+  assert.equal(parsed.errors.length, 1);
+
+  const existingT = Date.parse("2026-08-14T01:00:00Z");
+  const runtime = {
+    bars: {
+      CMB: {
+        1: [{ t: existingT, o: 949, h: 949.5, l: 948.8, c: 949.2, synthetic: true, source: "cmb", instrument: "CMB_ACCUMULATED_GOLD", market: "bank", currency: "CNY", unit: "gram" }],
+        5: [],
+        15: [],
+        60: [],
+        1440: [],
+      },
+    },
+  };
+  const result = applyManualCmbMinuteBars(runtime, parsed.entries, {}, now);
+  assert.equal(result.added, 1);
+  assert.equal(result.skipped, 1);
+  assert.equal(runtime.bars.CMB[1].length, 2);
+  assert.equal(runtime.bars.CMB[1][0].c, 949.2);
+  assert.equal(runtime.bars.CMB[1][1].source, "manual");
+  assert.equal(runtime.bars.CMB[1][1].synthetic, true);
+  assert.equal(runtime.bars.CMB[5].length, 1);
+  assert.equal(runtime.bars.CMB[5][0].c, 950.1);
+});
+
+test("listMissingCmbMinuteSlots returns today's open minutes without a CMB 1m bar", () => {
+  const now = new Date("2026-08-14T01:05:00Z"); // Beijing 09:05 Friday
+  const runtime = {
+    bars: {
+      CMB: {
+        1: [{ t: Date.parse("2026-08-14T01:00:00Z"), o: 949, h: 949.5, l: 948.8, c: 949.2 }],
+      },
+    },
+  };
+  const result = listMissingCmbMinuteSlots(runtime, normalizeConfig({ tradingHours: { open: "09:00", close: "18:00", weekdaysOnly: false } }), now);
+  assert.equal(result.date, "2026-08-14");
+  assert.deepEqual(result.slots, ["09:01", "09:02", "09:03", "09:04", "09:05"]);
+});
+
+
 
 test("normalizeConfig derives total grams and average cost from lots", () => {
   const config = normalizeConfig({
@@ -1220,6 +1270,69 @@ test("live CMB buy alert shows current price, not the lower suggested limit pric
   assert.match(message.body, /卖出目标价 945\.85 元\/克/);
   assert.doesNotMatch(message.body, /现价 947\.48/);
 });
+
+test("order change message tells user to cancel a previous buy order", () => {
+  const message = buildOrderChangeMessage({
+    action: "wait",
+    signalPrice: 980,
+  }, {
+    side: "buy",
+    action: "buy_setup",
+    instrument: "CMB",
+    cmbEstimatedPrice: 972.97,
+    grams: 10,
+  }, "cancel", DEFAULT_CONFIG, "zh");
+  assert.equal(message.action, "cancel_order");
+  assert.match(message.body, /请撤销原买入挂单 10克/);
+  assert.match(message.body, /原挂单价 972\.97 元\/克/);
+  assert.match(message.body, /当前建议：暂时没有合适机会/);
+});
+
+test("order change message tells user when a suggestion is updated", () => {
+  const oldOrder = {
+    side: "buy",
+    action: "buy_setup",
+    instrument: "CMB",
+    cmbEstimatedPrice: 972.97,
+    grams: 10,
+  };
+  const newPlan = {
+    action: "buy_setup",
+    signalPrice: 980,
+    targetPrice: 988,
+    suggestedOrder: {
+      side: "buy",
+      action: "buy_setup",
+      instrument: "CMB",
+      cmbEstimatedPrice: 974.2,
+      grams: 10,
+    },
+  };
+  const message = buildOrderChangeMessage(newPlan, oldOrder, "update", DEFAULT_CONFIG, "zh");
+  assert.equal(message.action, "order_updated");
+  assert.match(message.body, /原买入挂单 10克已更新/);
+  assert.match(message.body, /原挂单价 972\.97 元\/克/);
+  assert.match(message.body, /新挂单价 974\.2 元\/克/);
+});
+
+test("sameSuggestedOrder ignores rolling validUntil and detects price changes", () => {
+  const a = {
+    side: "buy",
+    action: "buy_setup",
+    instrument: "CMB",
+    cmbEstimatedPrice: 972.97,
+    grams: 10,
+    validUntil: "2026-08-15T01:50:00+08:00",
+  };
+  const b = {
+    ...a,
+    validUntil: "2026-08-15T02:00:00+08:00",
+  };
+  assert.equal(sameSuggestedOrder(a, b), true);
+  assert.equal(sameSuggestedOrder(a, { ...b, cmbEstimatedPrice: 974.2 }), false);
+  assert.equal(sameSuggestedOrder(a, null), false);
+});
+
 
 
 test("client dictionaries keep zh/en key parity", () => {

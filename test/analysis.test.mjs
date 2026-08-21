@@ -71,6 +71,7 @@ function validOutput() {
     invalidations: ["Data becomes stale"],
     dataWarnings: ["Synthetic minute bars"],
     suggestedOrder: null,
+    summary: "The market is neutral in the short term; wait for clearer signals.",
     riskDisclosure: "ignored and replaced by host",
   };
 }
@@ -170,6 +171,7 @@ test("output validation pins host identity and rejects executable actions", () =
   assert.equal(output.provider, "provider-a");
   assert.equal(output.model, "model-a");
   assert.equal(output.riskDisclosure, "Host disclosure");
+  assert.equal(output.summary, "The market is neutral in the short term; wait for clearer signals.");
   assert.equal(output.suggestedOrder, null);
   assert.throws(() => validateAnalysisOutput({ ...validOutput(), action: "buy" }, {
     asOf: "x", provider: "p", model: "m", quality: { ready: true }, riskDisclosure: "risk",
@@ -289,9 +291,9 @@ test("analysis timeout aborts a non-terminating stream and records the lifecycle
   assert.equal(log.error.code, "ANALYSIS_TIMEOUT");
 });
 
-test("analysis module blocks model I/O when the host quality gate fails", async (t) => {
+test("analysis module still calls the model when the host quality gate fails", async (t) => {
   const { store } = await tempStore(t);
-  const llm = fakeLlm(validOutput());
+  const llm = fakeLlm({ ...validOutput(), status: "stale", dataWarnings: ["Market data is stale"] });
   const snapshot = readySnapshot();
   snapshot.quality = { ready: false, reasonCodes: ["data_stale"] };
   const module = new AnalysisModule({
@@ -301,11 +303,33 @@ test("analysis module blocks model I/O when the host quality gate fails", async 
     logStore: store,
   });
   const result = await module.run();
+  assert.equal(result.ok, true);
+  assert.equal(result.status, "success");
+  assert.equal(result.analysis.status, "stale");
+  assert.equal(llm.calls, 1);
+  const logs = store.query({ detail: true });
+  assert.equal(logs.logs.length, 1);
+  assert.equal(logs.logs[0].status, "success");
+  assert.equal(logs.logs[0].result.status, "stale");
+});
+
+test("analysis module rejects analysis_ready while the host quality gate fails", async (t) => {
+  const { store } = await tempStore(t);
+  const llm = fakeLlm(validOutput());
+  const snapshot = readySnapshot();
+  snapshot.quality = { ready: false, reasonCodes: ["data_incomplete_30m"] };
+  const module = new AnalysisModule({
+    llm,
+    getContext: async () => ({ snapshot, bars: {} }),
+    getConfig: analysisConfig,
+    logStore: store,
+  });
+  const result = await module.run();
   assert.equal(result.ok, false);
-  assert.equal(result.status, "blocked");
-  assert.equal(result.error.code, "DATA_STALE");
-  assert.equal(llm.calls, 0);
-  assert.equal(store.query().logs.length, 0);
+  assert.equal(result.status, "invalid");
+  assert.equal(result.error.code, "INVALID_SCHEMA");
+  assert.equal(llm.calls, 1);
+  assert.equal(store.query().logs.length, 1);
 });
 
 test("invalid model JSON is an auditable invalid lifecycle", async (t) => {
