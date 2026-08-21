@@ -3,8 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  BARS_SEED_VERSION,
   DEFAULT_CONFIG,
+  aggregateSubBars,
   applyManualCmbMinuteBars,
+  applySignalPolicy,
   atr,
   bollinger,
   listMissingCmbMinuteSlots,
@@ -16,7 +19,10 @@ import {
   computeNextMarketOpen,
   computePlan,
   coverageGate,
+  defaultSignalState,
   mergeSecrets,
+  mergeKlines,
+  migrateBarsSeedVersion,
   normalizeConfig,
   parseCmbMarketCenterQuote,
   parseManualCmbMinuteEntries,
@@ -36,6 +42,7 @@ import {
   redactConfig,
   resampleBars,
   rsi,
+  seedBars,
   sma,
   windowCoverage,
 } from "../lib/index.js";
@@ -802,42 +809,57 @@ test("plan engine requires consecutive confirmation before issuing a buy signal"
     }
     return bars;
   }
+  // confirmBars counts *closed 5m bars*: two evaluations inside the same bar
+  // count once, and only a newer closed bar advances the streak.
   const now = new Date("2026-08-14T02:00:00Z");
-  const runtime = {
-    quotes: {
-      AU9999: { price: 951, bid: 950.8, ask: 951.2, source: "test", updatedAt: now.getTime() },
-      XAU: { price: 4375, source: "test", updatedAt: now.getTime() },
-      USDCNY: { price: 6.74, source: "test", updatedAt: now.getTime() },
-    },
-    bars: {
-      AU9999: { 1: [], 5: [], 60: [] },
-      XAU: {
-        1: oneMinBars("2026-08-14T02:00:00Z", 60),
-        5: makeBars(now.getTime() - 150 * 5 * 60_000, now.getTime(), 4315, 0.4),
-        60: makeBars(now.getTime() - 120 * 60 * 60_000, now.getTime(), 4315, 0.5),
+  const nextBar = new Date(now.getTime() + 5 * 60_000);
+  function makeRuntime(at) {
+    return {
+      quotes: {
+        AU9999: { price: 951, bid: 950.8, ask: 951.2, source: "test", updatedAt: at },
+        XAU: { price: 4375, source: "test", updatedAt: at },
+        USDCNY: { price: 6.74, source: "test", updatedAt: at },
       },
-    },
-    signalState: {
-      lastAction: null,
-      lastSide: null,
-      lastAt: null,
-      lastPositionGrams: 0,
-      lastPrice: null,
-      buyStreak: 0,
-      sellStreak: 0,
-    },
-  };
+      bars: {
+        AU9999: { 1: [], 5: [], 60: [] },
+        XAU: {
+          1: oneMinBars(at, 60),
+          5: makeBars(at - 150 * 5 * 60_000, at, 4315, 0.4),
+          60: makeBars(at - 120 * 60 * 60_000, at, 4315, 0.5),
+        },
+      },
+      signalState: {
+        lastAction: null,
+        lastSide: null,
+        lastAt: null,
+        lastPositionGrams: 0,
+        lastPrice: null,
+        buyStreak: 0,
+        sellStreak: 0,
+      },
+    };
+  }
   const config = normalizeConfig({
     limits: { maxGrams: 50 },
     strategy: { confirmBars: 2, signalCooldownMinutes: 0 },
   });
-  const first = computePlan(runtime, config, now);
+  const first = computePlan(makeRuntime(now.getTime()), config, now);
   assert.equal(first.action, "wait");
   assert.ok(first.reasonCodes.includes("signal_confirming"));
   assert.equal(first.signalState.buyStreak, 1);
 
-  runtime.signalState = first.signalState;
-  const second = computePlan(runtime, config, now);
+  // Same closed bar again: still confirming, no double count.
+  const runtimeRepeat = makeRuntime(now.getTime());
+  runtimeRepeat.signalState = first.signalState;
+  const repeat = computePlan(runtimeRepeat, config, new Date(now.getTime() + 30_000));
+  assert.equal(repeat.action, "wait");
+  assert.ok(repeat.reasonCodes.includes("signal_confirming"));
+  assert.equal(repeat.signalState.buyStreak, 1);
+
+  // Next closed bar: streak reaches confirmBars → fired.
+  const runtimeSecond = makeRuntime(nextBar.getTime());
+  runtimeSecond.signalState = first.signalState;
+  const second = computePlan(runtimeSecond, config, nextBar);
   assert.equal(second.action, "buy_setup");
   assert.equal(second.suggestedOrder.side, "buy");
   assert.equal(second.signalState.buyStreak, 2);
@@ -1392,4 +1414,197 @@ test("client dictionaries keep zh/en key parity", () => {
   assert.equal(registrations[0].registered.entry.id, "dsh-plugin-goldboard-board");
   assert.equal(registrations[1].registered.entry.id, "dsh-plugin-goldboard");
   assert.equal(registrations[1].registered.entry.order, 72);
+});
+
+// ── plan-01 §01.1: 60m bucket aggregation + seed-version migration ─────────
+
+/** Twelve 5m sub-bars for one hour; OHLC varies deterministically per bar. */
+function fiveMinuteHour(hourStartMs, hourIndex) {
+  const bars = [];
+  for (let j = 0; j < 12; j += 1) {
+    const t = hourStartMs + j * 5 * 60_000;
+    const o = hourIndex * 100 + 10 + j;
+    const c = o + 5;
+    bars.push({ t, o, h: c + 2, l: o - 1, c });
+  }
+  return bars;
+}
+
+test("aggregateSubBars builds true OHLC hour buckets and skips the open hour", () => {
+  const meta = { source: "eastmoney", instrument: "Au99.99", market: "sge", currency: "CNY", unit: "gram" };
+  // 09:00–12:00 Beijing: three complete hours plus one in progress.
+  const hour0 = Date.parse("2026-08-14T01:00:00Z");
+  const now = Date.parse("2026-08-14T04:00:00Z"); // 12:00 Beijing, hour 3 just opened
+  const klines = [
+    ...fiveMinuteHour(hour0, 0),
+    ...fiveMinuteHour(hour0 + 60 * 60_000, 1),
+    ...fiveMinuteHour(hour0 + 2 * 60 * 60_000, 2),
+    ...fiveMinuteHour(hour0 + 3 * 60 * 60_000, 3).slice(0, 4), // in-progress hour
+  ];
+  const list = [];
+  aggregateSubBars(list, klines, 60, meta, now);
+  assert.equal(list.length, 3, "in-progress hour excluded");
+  for (let hour = 0; hour < 3; hour += 1) {
+    const bar = list[hour];
+    const t = hour0 + hour * 60 * 60_000;
+    assert.equal(bar.t, t);
+    assert.equal(bar.o, hour * 100 + 10, "open = first sub-bar open");
+    assert.equal(bar.c, hour * 100 + 21 + 5, "close = last sub-bar close");
+    assert.equal(bar.h, hour * 100 + 21 + 5 + 2, "high = max sub-bar high");
+    assert.equal(bar.l, hour * 100 + 10 - 1, "low = min sub-bar low");
+    assert.equal(bar.synthetic, false);
+    assert.equal(bar.source, "eastmoney");
+    assert.equal(bar.instrument, "Au99.99");
+    assert.equal(bar.market, "sge");
+    assert.equal(bar.currency, "CNY");
+    assert.equal(bar.unit, "gram");
+  }
+});
+
+test("aggregateSubBars overwrites corrupt buckets but keeps uncovered tick bars", () => {
+  const hour0 = Date.parse("2026-08-14T01:00:00Z");
+  const now = hour0 + 60 * 60_000; // first hour complete, second in progress
+  const klines = fiveMinuteHour(hour0, 0);
+  // Pre-existing state: a corrupt bucket (last sub-bar OHLC only, as v1.2.x
+  // seedBars produced) plus a tick-built synthetic bucket in a later hour.
+  const corrupt = { t: hour0, o: 21, h: 28, l: 20, c: 26, synthetic: false, source: "eastmoney" };
+  const tickBucket = { t: hour0 + 2 * 60 * 60_000, o: 999, h: 999, l: 999, c: 999, synthetic: true };
+  const list = [corrupt, tickBucket];
+  aggregateSubBars(list, klines, 60, { source: "eastmoney" }, now);
+  assert.equal(list.length, 2, "uncovered tick bucket preserved");
+  assert.equal(list[0].o, 10, "corrupt bucket re-aggregated from sub-bars");
+  assert.equal(list[0].h, 28, "aggregated high covers all 12 sub-bars");
+  assert.equal(list[0].l, 9);
+  assert.equal(list[0].c, 26);
+  assert.deepEqual(list[1], tickBucket);
+});
+
+test("seedBars merges 5m klines directly and aggregates the 60m lane", () => {
+  const hour0 = Date.parse("2026-08-14T01:00:00Z");
+  const now = hour0 + 3 * 60 * 60_000;
+  const klines = [
+    ...fiveMinuteHour(hour0, 0),
+    ...fiveMinuteHour(hour0 + 60 * 60_000, 1),
+    ...fiveMinuteHour(hour0 + 2 * 60 * 60_000, 2),
+  ];
+  const bars = { 5: [], 60: [] };
+  seedBars(bars, klines, { source: "eastmoney", instrument: "Au99.99" }, now);
+  assert.equal(bars[5].length, 36, "5m lane keeps one bar per sub-bar");
+  assert.equal(bars[60].length, 3, "60m lane holds one aggregated bucket per hour");
+  assert.equal(bars[60][1].o, 110);
+  assert.equal(bars[60][1].c, 126);
+});
+
+test("migrateBarsSeedVersion drops stale [5]/[60] lanes and preserves the rest", () => {
+  const bars = {
+    AU9999: { 1: [{ t: 1, o: 1, h: 1, l: 1, c: 1 }], 5: [{ t: 2, o: 1, h: 1, l: 1, c: 1 }], 60: [{ t: 3, o: 1, h: 1, l: 1, c: 1 }], 1440: [{ t: 4, o: 1, h: 1, l: 1, c: 1 }] },
+    XAU: { 5: [{ t: 5, o: 1, h: 1, l: 1, c: 1 }], 60: [{ t: 6, o: 1, h: 1, l: 1, c: 1 }] },
+    GCF: { 1440: [{ t: 7, o: 1, h: 1, l: 1, c: 1 }] },
+    CMB: { 1: [{ t: 8, o: 1, h: 1, l: 1, c: 1 }], 5: [{ t: 9, o: 1, h: 1, l: 1, c: 1 }] },
+  };
+  assert.equal(BARS_SEED_VERSION, 2);
+  // Missing version field (pre-v1.3.1 state) → migrate.
+  assert.equal(migrateBarsSeedVersion(bars, undefined), true);
+  assert.deepEqual(bars.AU9999[5], []);
+  assert.deepEqual(bars.AU9999[60], []);
+  assert.equal(bars.AU9999[1].length, 1, "other intervals preserved");
+  assert.equal(bars.AU9999[1440].length, 1);
+  assert.deepEqual(bars.XAU[5], []);
+  assert.deepEqual(bars.XAU[60], []);
+  assert.equal(bars.GCF[1440].length, 1, "GCF lane untouched");
+  assert.equal(bars.CMB[5].length, 1, "CMB lane untouched");
+
+  // Old version number → migrate too.
+  const old = { AU9999: { 5: [{ t: 1, o: 1, h: 1, l: 1, c: 1 }], 60: [] }, XAU: { 5: [], 60: [] } };
+  assert.equal(migrateBarsSeedVersion(old, 1), true);
+  assert.deepEqual(old.AU9999[5], []);
+
+  // Current version → keep everything.
+  const fresh = { AU9999: { 5: [{ t: 1, o: 1, h: 1, l: 1, c: 1 }], 60: [{ t: 2, o: 1, h: 1, l: 1, c: 1 }] }, XAU: { 5: [], 60: [] } };
+  assert.equal(migrateBarsSeedVersion(fresh, BARS_SEED_VERSION), false);
+  assert.equal(fresh.AU9999[5].length, 1);
+  assert.equal(fresh.AU9999[60].length, 1);
+});
+
+// ── plan-01 §01.4: confirmBars counts closed bars, resets on signal-set end ─
+
+function policyPlan(action, { signalBarT = null, instrument = "Au99.99", marketState = "open" } = {}) {
+  return {
+    action,
+    instrument,
+    marketState,
+    signalPrice: 950,
+    grams: 0,
+    reasonCodes: [],
+    suggestedOrder: null,
+    ...(signalBarT !== null ? { signalBarT } : {}),
+  };
+}
+
+const POLICY_CFG = normalizeConfig({ strategy: { confirmBars: 2, signalCooldownMinutes: 0 } });
+const BAR_T0 = Date.parse("2026-08-14T01:05:00Z");
+const BAR_T1 = BAR_T0 + 5 * 60_000;
+const BAR_T2 = BAR_T0 + 10 * 60_000;
+
+test("applySignalPolicy counts each closed 5m bar once, firing on the second bar", () => {
+  let state = defaultSignalState();
+  const first = applySignalPolicy(policyPlan("buy_setup", { signalBarT: BAR_T0 }), state, POLICY_CFG, new Date(BAR_T0));
+  assert.equal(first.plan.action, "wait");
+  assert.ok(first.plan.reasonCodes.includes("signal_confirming"));
+  assert.equal(first.signalState.buyStreak, 1);
+  assert.equal(first.signalState.lastBarT.buy, BAR_T0);
+
+  // Re-evaluation 30s later, still the same closed bar: no double count.
+  const repeat = applySignalPolicy(policyPlan("buy_setup", { signalBarT: BAR_T0 }), first.signalState, POLICY_CFG, new Date(BAR_T0 + 30_000));
+  assert.equal(repeat.plan.action, "wait");
+  assert.equal(repeat.signalState.buyStreak, 1);
+
+  // Second distinct closed bar: streak reaches confirmBars → fired.
+  const second = applySignalPolicy(policyPlan("buy_setup", { signalBarT: BAR_T1 }), repeat.signalState, POLICY_CFG, new Date(BAR_T1));
+  assert.equal(second.plan.action, "buy_setup");
+  assert.ok(!second.plan.reasonCodes.includes("signal_confirming"), "confirmation no longer pending");
+  assert.equal(second.signalState.buyStreak, 2);
+  assert.equal(second.signalState.lastBarT.buy, BAR_T1);
+});
+
+test("applySignalPolicy resets both streaks when the action leaves the direction set", () => {
+  const state = { ...defaultSignalState(), buyStreak: 1, sellStreak: 2, lastBarT: { buy: BAR_T0, sell: BAR_T0 } };
+  const waited = applySignalPolicy(policyPlan("wait", { signalBarT: BAR_T1 }), state, POLICY_CFG, new Date(BAR_T1));
+  assert.equal(waited.signalState.buyStreak, 0);
+  assert.equal(waited.signalState.sellStreak, 0);
+  assert.deepEqual(waited.signalState.lastBarT, { buy: null, sell: null });
+  // A later isolated buy signal starts counting from scratch instead of
+  // riding the stale streak.
+  const revived = applySignalPolicy(policyPlan("buy_setup", { signalBarT: BAR_T2 }), waited.signalState, POLICY_CFG, new Date(BAR_T2));
+  assert.equal(revived.signalState.buyStreak, 1);
+  assert.equal(revived.plan.action, "wait");
+});
+
+test("applySignalPolicy resets streaks on signal-instrument switch and market close", () => {
+  const state = { ...defaultSignalState(), buyStreak: 1, lastBarT: { buy: BAR_T0, sell: null }, instrument: "Au99.99" };
+  const switched = applySignalPolicy(policyPlan("buy_setup", { signalBarT: BAR_T1, instrument: "CMB" }), state, POLICY_CFG, new Date(BAR_T1));
+  assert.equal(switched.signalState.instrument, "CMB");
+  assert.equal(switched.signalState.buyStreak, 1, "count restarts on the new instrument");
+  assert.equal(switched.plan.action, "wait");
+
+  const closed = applySignalPolicy(
+    policyPlan("market_closed", { instrument: "CMB", marketState: "closed" }),
+    { ...defaultSignalState(), buyStreak: 3, sellStreak: 1, lastBarT: { buy: BAR_T0, sell: BAR_T0 }, instrument: "CMB" },
+    POLICY_CFG,
+    new Date(BAR_T1),
+  );
+  assert.equal(closed.signalState.buyStreak, 0);
+  assert.equal(closed.signalState.sellStreak, 0);
+  assert.deepEqual(closed.signalState.lastBarT, { buy: null, sell: null });
+});
+
+test("applySignalPolicy keeps sell-side counting independent of the buy clock", () => {
+  const state = { ...defaultSignalState(), instrument: "Au99.99", buyStreak: 2, lastBarT: { buy: BAR_T1, sell: null } };
+  // sell_stop is emergency-class: it skips confirmation and fires immediately.
+  const sell = applySignalPolicy(policyPlan("sell_stop", { signalBarT: BAR_T0 }), state, POLICY_CFG, new Date(BAR_T0 + 30_000));
+  assert.equal(sell.plan.action, "sell_stop");
+  assert.equal(sell.signalState.buyStreak, 0, "opposite streak cleared on fire");
+  assert.equal(sell.signalState.sellStreak, 1, "sell side counts its own bar clock");
+  assert.equal(sell.signalState.lastBarT.buy, BAR_T1, "buy clock untouched");
+  assert.equal(sell.signalState.lastBarT.sell, BAR_T0);
 });
