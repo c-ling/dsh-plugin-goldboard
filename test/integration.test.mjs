@@ -611,6 +611,110 @@ test("integration: POST /replay reproduces the golden snapshot exactly", async (
   assert.deepEqual(replayed.body, golden, "replay output equals the committed golden snapshot");
 });
 
+// ── 9b. plan-06: batch replay statistics over the live route surface ────────
+
+/** Deterministic klines for the trading days the frozen clock selects. */
+function replayKlineStub(callLog) {
+  const sessionMinutes = 17 * 60;
+  const buildBars = (dayList, strideMinutes) => {
+    const bars = [];
+    let index = 0;
+    for (const day of dayList) {
+      const startMs = Date.parse(`${day}T09:00:00+08:00`);
+      for (let i = 0; i < sessionMinutes / strideMinutes; i += 1) {
+        const barT = startMs + i * strideMinutes * 60_000;
+        const base = 950 + index * 0.02 + Math.sin(index / 8) * 0.4;
+        bars.push({ t: barT, o: base, h: base + 0.3, l: base - 0.3, c: base + 0.05 });
+        index += strideMinutes / 5;
+      }
+    }
+    return bars;
+  };
+  return async (url) => {
+    const text = String(url);
+    if (text.includes("kline")) {
+      const secid = text.match(/secid=([^&]+)/)[1];
+      const klt = Number(text.match(/klt=(\d+)/)[1]);
+      const endDay = text.match(/end=(\d{8})/)[1];
+      callLog.push(`${secid}|${klt}|${endDay}`);
+      // Point-in-time replay pulls use end=YYYYMMDD; the boot-tick seeding
+      // keeps its sentinel end=20500101 and gets today's session (real bars,
+      // so the source circuit breaker stays closed for the engine).
+      const sessions = /^2026\d{4}$/.test(endDay)
+        ? [`${endDay.slice(0, 4)}-${endDay.slice(4, 6)}-${endDay.slice(6, 8)}`]
+        : ["2026-08-14"];
+      const bars = buildBars(sessions, klt === 5 ? 5 : 60);
+      const rows = bars.map((bar) => {
+        const beijing = new Date(bar.t + 8 * 3600_000).toISOString().replace("T", " ").slice(0, 16);
+        return [beijing, bar.o, bar.c, bar.h, bar.l, 1].join(",");
+      });
+      return { ok: true, text: async () => JSON.stringify({ data: { klines: rows } }) };
+    }
+    throw new Error("source unavailable in test");
+  };
+}
+
+test("integration: POST/GET /replay-stats serve a cached report with fetch-once days", async (t) => {
+  freezeSession(t); // Beijing Friday 2026-08-14 12:00 → window [08-13, 08-14]
+  const calls = [];
+  const previousFetch = __setFetchImpl(replayKlineStub(calls));
+  t.after(() => __setFetchImpl(previousFetch));
+
+  const h = await boot({ config: {} });
+  t.after(() => h.dispose());
+
+  const started = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2 } });
+  assert.equal(started.status, 200);
+  assert.equal(started.body.ok, true);
+  assert.equal(started.body.cached, false);
+  const report = started.body.report;
+  assert.equal(report.version, 1);
+  assert.equal(report.params.days, 2);
+  assert.equal(report.daysRequested, 2);
+  assert.equal(report.daysEvaluated, 2);
+  assert.deepEqual(report.window, { from: "2026-08-13", to: "2026-08-14" });
+  assert.ok(report.totals.steps >= 2 * 204 * 2 * 0.9, `steps cover both passes (${report.totals.steps})`);
+  assert.ok(Array.isArray(report.perAction));
+  assert.equal(report.failures.length, 0);
+
+  // Point-in-time pulls: exactly one 5m + one 60m request per day.
+  const dayPulls = calls.filter((call) => call.endsWith("20260813") || call.endsWith("20260814"));
+  assert.equal(dayPulls.length, 4);
+
+  // Same-window repeat → TTL cache; GET serves the same report idempotently.
+  const again = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2 } });
+  assert.equal(again.body.cached, true);
+  assert.deepEqual(again.body.report, report);
+  const fetched = await h.call("/dsh-plugin-goldboard/replay-stats", "GET", { url: "/dsh-plugin-goldboard/replay-stats?detail=true" });
+  assert.equal(fetched.status, 200);
+  assert.equal(fetched.body.ok, true);
+  assert.deepEqual(fetched.body.report, report);
+
+  // Report persisted next to state.json.
+  const persisted = JSON.parse(await readFile(join(h.dir, "replay-stats.json"), "utf8"));
+  assert.equal(persisted.report.version, 1);
+});
+
+test("integration: mid-window source failure surfaces as a partial report on the route", async (t) => {
+  freezeSession(t);
+  const calls = [];
+  const stub = replayKlineStub(calls);
+  const previousFetch = __setFetchImpl(async (url) => {
+    if (String(url).includes("end=20260814")) throw new Error("day-2 source down");
+    return stub(url);
+  });
+  t.after(() => __setFetchImpl(previousFetch));
+
+  const h = await boot({ config: {} });
+  t.after(() => h.dispose());
+  const result = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2 } });
+  assert.equal(result.status, 200);
+  assert.equal(result.body.ok, true);
+  assert.equal(result.body.report.daysEvaluated, 1);
+  assert.equal(result.body.report.daysFailed, 1);
+  assert.deepEqual(result.body.report.failures, [{ day: "2026-08-14", error: "day-2 source down" }]);
+});
+
 // ── 10. dispose: the final flush is awaited ─────────────────────────────────
 
 test("integration: dispose flushes pending bars state before resolving", async (t) => {

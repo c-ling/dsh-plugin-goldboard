@@ -14,20 +14,20 @@ A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right fl
 Install into the web profile from GitHub (requires `pnpm` on `PATH`; otherwise use the corepack fallback below):
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
 Or with an existing `dsh` binary:
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
 When `pnpm` is not on `PATH`:
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
 > `dsh plugin` forwards its arguments to pnpm and fetches the package from this repo (pnpm 9+, `git` required). The warning `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is not a profile bundle layer; it is activated by the loader row below.
@@ -66,12 +66,12 @@ The model catalog comes from currently registered Harness providers. Log queries
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
-# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
-# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
+# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
+# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
-Re-running the install command with the new `#v1.7.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
+Re-running the install command with the new `#v1.8.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
 
 ## Uninstall
 
@@ -101,6 +101,7 @@ This plugin keeps state under `$DSH_HOME/storages/dsh-plugin-goldboard/`, which 
 - Auditable market semantics: quotes expose `instrument`, `market`, `currency`, `unit` and source-quality metadata; XAU/USD spot and Yahoo `GC=F` futures stay in separate lanes. Polling and FX-derived bars are explicitly marked `synthetic`; formal indicators use closed bars only and expose `calculationVersion`, `warmupReady` and fixed Wilder smoothing methods. Fixed-fixture replay is available at `POST /dsh-plugin-goldboard/replay`.
 - Manual model analysis: choose a provider, model and reasoning effort from the current Harness catalog without changing the active conversation model. The model explains host-computed indicators and the rule plan only; it cannot invent prices or issue trading instructions. When data-quality gates fail, manual analysis can still be invoked and the model must report the data limitations. Settings → Gold Board adds model selection, Analyze now and a separate Query logs panel.
 - Query audit logs: every real model call gets a `queryId` and started/finished lifecycle record with model, market snapshot, quality state, input hash, structured result, usage and errors. Logs are stored at `$DSH_HOME/storages/dsh-plugin-goldboard/analysis-log.jsonl`, with redacted details, filters, cursor pagination and orphaned-running recovery.
+- Strategy statistics (v1.8.0, read-only analysis): batch-replays the last 10/20/30 trading days under the current strategy parameters — per day it pulls "as of that day" 5m+60m klines (no lookahead), rebuilds indicators and rules bar-by-bar on the Au99.99 signal lane (confirmBars/cooldown stay active), and reports how often each action fired (buy setup and the take-profit/trailing/stop/weakness family) together with target hit rate, stop-hit rate, MFE/MAE, net P&L held to session end, plus a confidence-score × hit-rate breakdown. The report ships its methodology caveats (Au99.99 lane only, minute coverage derived from 5m klines, synthetic-lane sampling fidelity, …). Same-parameter results cache for one hour; mid-window source failures yield a partial report; results persist to `storages/dsh-plugin-goldboard/replay-stats.json`. One-click generation from the bilingual “Strategy statistics” settings card.
 
 ## Data sources
 
@@ -111,7 +112,7 @@ Free public, unofficial endpoints; they may rate-limit or change:
 - USDCNY: Tencent `whUSDCNY`
 - CMB 积存金: `https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center` (POST `params=[{"prdType":"H","prdCode":""}]`)
 - Brand / accumulated gold (status page): Jinjinhao `api.jijinhao.com`, JD Finance `api.jdjygold.com`
-- Au99.99 klines: Eastmoney `push2his.eastmoney.com`, with SGE `graph/Dailyhq` history as a fallback
+- Au99.99 klines: Eastmoney `push2his.eastmoney.com` (falls back to the `push2delay.eastmoney.com` mirror when rate-limited; closed-history data only), with SGE `graph/Dailyhq` history as a fallback
 - XAU/USD spot klines: Eastmoney `push2his.eastmoney.com`; if unavailable, the plugin marks data as insufficient instead of renaming Yahoo futures as spot
 - GC=F futures diagnostic daily bars: Yahoo Finance `query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d`
 - XAU / CMB minute bars: built by the host from polling quotes

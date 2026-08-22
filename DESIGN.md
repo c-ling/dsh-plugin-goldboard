@@ -207,6 +207,10 @@
 - Au99.99：东财
   `push2his.eastmoney.com/api/qt/stock/kline/get?secid=118.AU9999&klt=5|15|30|60|101&fqt=1&lmt=...`
   实测 60 分钟与日线可用；字段 `f51..f58` = `date,open,close,high,low,volume,amount,amplitude`。
+  **镜像回退（v1.8.0）**：主源被反爬限流（连续 Empty reply / 连接中断，实测存在）时自动改用
+  `push2delay.eastmoney.com` 延迟镜像——对已收盘历史 bar 两者数据完全一致（15 分钟延迟无影响）；
+  镜像拥有独立熔断记账（`<sourceId>-delayed`），主源熔断保护实盘轮询的同时镜像仍可兜底，
+  数据源状态页新增 `eastmoney-kline-delayed` 行。
   历史兜底：上金所 `POST https://www.sge.com.cn/graph/Dailyhq`（`instid=Au99.99`，行格式 `[日期, 开, 收, 低, 高]`）。
 - XAU/USD 现货 K 线：东财 `122.XAU` 为现货主源；源不可用时质量状态明确降级，不把其他品种改名为现货。
 - `GC=F` 期货日线诊断：Yahoo Finance
@@ -382,6 +386,46 @@
 - 除常规买卖信号外，还额外跟踪最近一次委托建议；原建议失效或参数变化时，以 `cancel_order` / `order_updated` 边沿提醒。
 - **连续确认语义（v1.3.1）**：`strategy.confirmBars = N` 表示「方向条件在**连续 N 根已收盘的 5 分钟 bar** 上成立」才发出建议——计数以信号道最新已收盘 5m bar 的 `t` 为时钟，同一根 bar 内的多次轮询评估不重复计数。动作脱离方向集（wait / 数据类状态）、信号道品种切换、或 `marketState` 转为 `closed` 时，买卖两条 streak 全部清零重新计数；陈旧的 streak 不会让下一次孤立信号免检通过。
 
+### 7.6 批量回放统计口径与局限（v1.8.0，plan-06）
+
+只读分析功能（不发提醒、不调模型、不改任何策略行为），回答「某入场/出场条件过去 N 个交易日触发几次、事后命中率多少」。路由契约见 §8.11。
+
+**统计口径**
+
+- **统计宇宙**：Au99.99 信号道（东财 K 线有足够历史深度）；招行实时报价无历史数据、国际道受合成采样保真度限制，均不入统计并在 caveats 披露。
+- **逐日点时重建**：对窗口内每个北京交易日 D（复用 market-time 交易日历），各拉一次
+  「截至 D 收盘」的 5m（lmt=500）+ 60m（lmt=300）K 线——`end=<D>` 保证当日评估**不泄露未来数据**
+  （no-lookahead），前一日尾部同时充当指标预热；每 (日, 周期) 进程内仅拉一次并按日缓存。
+- **步进评估**：以当日盘中 5m 收盘 bar 为时间轴，滚动重建 bars 窗口后调用 indicators + computePlan
+  **纯路径**。alert 状态机不参与（统计的是规则本身）；confirmBars 与同向冷却照常生效（属于信号语义），
+  signalState 每日重置。
+- **双模拟通道**：每根 5m bar 按「空仓」（仓位清零、名义预算 100 克，保证 buy_setup 可发）与
+  「持仓」（按当日首个盘中价建仓 100 克，使 sell_* 家族可观察）各评估一次；动作计数为两条通道合计，
+  报告 caveats 中如实说明。
+- **事件与事后追踪**（forward outcomes，按 5m 序列）：入场类（buy_setup / add_position）记录
+  目标价触达率、止损触发率、回本触及率（首次触碰优先）、MFE/MAE（+30m/+60m）、持有至时段结束的
+  净盈亏（扣买入+卖出手续费 + 估算价差 + 滑点）；卖出家族对称地报告「离场后 60 分钟漂移」（负值 =
+  离场优于继续持有）与时段末净节省。聚合层另报 `coverageBlockedRatio`（data_incomplete 步占比）与
+  置信分（≤4 / 5 / 6 / ≥7）×目标命中率分箱。
+- **分钟覆盖率推导**：1m 合成 bar 仅保留约一天，统计窗口的分钟覆盖率由真实 5m K 线拆分为分钟槽推导
+  （含「正在形成的分钟」标记槽，语义对齐实盘轮询），5 分钟内的微观缺口不可见。
+
+**已知局限（报告 `caveats` 数组如实携带，设置页展示）**
+
+| caveat | 说明 |
+| --- | --- |
+| `lane-au9999-only` | 仅 Au99.99 道；结论不能直接套用于招行实盘口径 |
+| `minute-coverage-from-5m` | 分钟覆盖率由 5m K 线拆分，粒度粗于实盘 |
+| `synthetic-lane-sampling` | 合成/低采样道每 bar 样本有限（如国际道 ≤2 样本/bar），精度低于实盘轮询，勿当交易依据 |
+| `history-depth-limited` | 免费源 5m 深度约 10+ 个交易日，超出深度在 failures 如实列出 |
+| `two-simulated-passes` | 双模拟通道口径（空仓 + 当日开盘价持仓） |
+| `past-performance-advisory` | 历史命中率不代表未来表现，仅供调参参考 |
+
+**工程约束**：单飞行去重（并发 POST 加入同一计算）；同窗口参数结果缓存 1 小时；
+客户端断开（res close 且响应未完成 → AbortController）在交易日边界取消且不再推进；逐日 await 让出事件循环，
+tick 循环不受影响；中途源失败产出已完成天数的部分报告 + failures 列表；报告落盘
+`storages/dsh-plugin-goldboard/replay-stats.json`（只含聚合层；明细仅在 `detail=true` 时截断至最近 200 条返回，不落盘）。
+
 ---
 
 ## 8. 宿主路由契约
@@ -514,6 +558,67 @@
 
 - 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用），用于设置页验证。
 
+### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.8.0，plan-06）
+
+批量回放统计（口径与局限见 §7.6）。只读分析：不发提醒、不调模型、不改策略行为。
+
+`POST` 请求体（256 KiB 上限内）：
+
+```json
+{ "days": 10, "force": false, "detail": false }
+```
+
+- `days` 默认 10，夹取 [1, 30]；`force=true` 绕过 1 小时同参数缓存；
+  `detail=true` 时响应附带 `events` 数组（截断至最近 `REPLAY_DETAIL_EVENT_CAP = 200` 条）。
+- 单飞行：已有计算在跑时并发请求直接加入同一 Promise。
+- 客户端断开（res close 且 `writableFinished` 为假）→ AbortController 在交易日边界取消，返回
+  `200 { ok:false, status:"cancelled", error:{ code:"REPLAY_STATS_CANCELLED" } }`。
+
+`POST` 成功响应（含部分失败也返回 ok:true）：
+
+```json
+{
+  "ok": true,
+  "cached": false,
+  "report": {
+    "version": 1,
+    "generatedAt": "2026-08-14T04:00:00.000Z",
+    "calculationVersion": "goldboard-indicators-v2",
+    "params": { "days": 10, "lane": "auto" },
+    "window": { "from": "2026-08-03", "to": "2026-08-14" },
+    "daysRequested": 10,
+    "daysEvaluated": 9,
+    "daysFailed": 1,
+    "totals": { "steps": 4080, "directionalEvents": 37, "blockedSteps": 512, "coverageBlockedRatio": 0.1255 },
+    "perAction": [
+      {
+        "action": "buy_setup",
+        "count": 11,
+        "targetHitRate": 0.3636,
+        "stopHitRate": 0.0909,
+        "breakevenTouchedRate": 0.8182,
+        "avgMfe30m": 0.42,
+        "avgMae30m": 0.55,
+        "avgMfe60m": 0.61,
+        "avgMae60m": 0.78,
+        "avgPostExitDrift60m": null,
+        "sessionEndAvgNet": -4.12,
+        "perLaneSplit": { "AU9999": 11 }
+      }
+    ],
+    "confidenceBuckets": [
+      { "bucket": "≥7", "events": 8, "targetHitRate": 0.5, "avgMfe30m": 0.51, "sessionEndAvgNet": -3.2 }
+    ],
+    "caveats": ["lane-au9999-only", "minute-coverage-from-5m", "synthetic-lane-sampling",
+                 "history-depth-limited", "two-simulated-passes", "past-performance-advisory"],
+    "failures": [{ "day": "2026-08-09", "error": "HTTP 502" }]
+  }
+}
+```
+
+`GET` 返回最近一次报告（内存 → `storages/dsh-plugin-goldboard/replay-stats.json` 落盘回读，
+幂等只读）；无报告时 `{ ok: true, report: null }`。落盘文件仅含聚合层 `report`，不含事件明细。
+
 ---
 
 ## 9. 浏览器半设计
@@ -546,6 +651,11 @@
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
+- **策略统计卡片（v1.8.0，plan-06）**：「模型与分析」区旁提供天数选择（10/20/30）、
+  「生成统计」按钮、进度文案、动作 × 命中率/MFE/MAE/时段末净益结果表、置信分分箱与
+  caveats 展示；进入设置页时 GET 回显最近一次落盘报告；全部文案走 `t()` 双语词典，
+  表格样式只用 `--dsw-alias-*` token（表头 `bg-layer-2`、行分隔 `border-l1`、净益
+  正 `state-success-primary` / 负 `state-error-primary`）。
 - **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
   `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
   - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像
@@ -632,6 +742,19 @@
 | 手动持仓与真实账户漂移 | 建议失真 | 设置页显示“最后同步时间”；用户手动更新；v2 预留账户同步 |
 | 宿主不运行时无提醒 | 漏提醒 | 设置页明示“提醒依赖 DSH 宿主运行”；浏览器半只负责看板 |
 | 浮窗遮挡 UI | 打扰 | 折叠优先、根节点尺寸限定、可拖拽、可关闭、不抢焦点 |
+
+---
+
+## 12.1 v2 遗留方向（plan-06 收尾记录）
+
+批量回放统计（§7.6 / §8.11）打通了「手调默认值 → 数据依据」的最短路径；以下方向留待 v2：
+
+- **参数网格寻优**：以 replay-stats 引擎为底，对 `strategy.*`（RSI 阈值 / ATR 系数 / scoreThreshold /
+  confirmBars）做受控网格扫描与稳健性检验（避免过拟合：留出验证日、交易成本敏感性）。
+- **更多标的**：把统计宇宙从 Au99.99 道扩展到 XAU 折算道（需历史汇率序列）与 Ag99.99 等品种；
+  招行道若获得历史数据源则优先补齐。
+- **账户同步**：以真实成交回填（替代「当日开盘价建仓」的持仓模拟通道），统计实际滑点与手续费
+  假设的偏差，反哺 §7.3 默认值。
 
 ---
 

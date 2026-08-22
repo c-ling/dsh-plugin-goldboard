@@ -38,8 +38,8 @@
 - 建议：plan-01 → `v1.2.1`（patch）；plan-02 → `v1.3.0`；plan-03 → `v1.4.0`；
   plan-04 → `v1.5.0`（含 config.json 一次性迁移）；plan-05 → `v1.6.0`；plan-06 → `v1.7.0`。
 - **实际发布记录**（与上方建议有偏移，以 tag 为准）：plan-01 → `v1.3.1`；
-  plan-02 → `v1.4.0`；plan-03 → `v1.5.0`；后续 plan-04 → `v1.6.0`、plan-05 → `v1.7.0`、
-  plan-06 → `v1.8.0` 顺延（执行时以 `git tag` 实际最大版本 +1 为准）。
+  plan-02 → `v1.4.0`；plan-03 → `v1.5.0`；plan-04 → `v1.6.0`；plan-05 → `v1.7.0`；
+  plan-06 → `v1.8.0`（全部完成 ✅）。
 - 同一提交内同步：bump `package.json#version` + 两份 README 的 `#v<pin>` + DESIGN.md 受影响章节。
 - 发布前必跑：`grep -rn "v<旧版本>" README*` 确认无残留旧 pin。
 

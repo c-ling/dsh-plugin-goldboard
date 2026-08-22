@@ -14,20 +14,20 @@ DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起
 从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
 或使用已有的 `dsh` 命令：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
 pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
 > `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
@@ -69,12 +69,12 @@ curl -s 'http://127.0.0.1:3080/dsh-plugin-goldboard/analysis-logs?limit=30'
 ## 更新
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.7.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.8.0"
 ```
 
-用新的 `#v1.7.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
+用新的 `#v1.8.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
 ## 卸载
@@ -105,6 +105,7 @@ corepack pnpm remove dsh-plugin-goldboard
 - 技术口径审计：报价带 `instrument`、`market`、`currency`、`unit` 和来源质量元数据；XAU/USD 现货与 Yahoo `GC=F` 黄金期货分开，轮询和汇率推导 K 线明确标记 `synthetic`；正式指标只使用已收盘 K 线，并输出 `calculationVersion`、`warmupReady` 与固定的 Wilder 平滑方法。提供固定行情回放接口：`POST /dsh-plugin-goldboard/replay`。
 - 模型分析（手动触发）：从 Harness 当前可用的 provider/model 目录选择模型和 reasoning effort，不改变当前会话模型；模型只解释宿主指标和规则 plan，不能补造价格或生成买卖指令。即使数据质量门控未通过也可手动调用，模型需以数据不足/过期/无效等状态说明限制。设置页的「模型与分析」区域提供目录选择、「立即分析」和独立「查询日志」面板。
 - 分析查询日志：每次真实模型调用生成 `queryId`，记录 started/finished 生命周期、模型、行情快照、质量状态、输入 hash、结构化结果、usage 和错误；日志写入 `$DSH_HOME/storages/dsh-plugin-goldboard/analysis-log.jsonl`，支持脱敏详情、筛选、游标分页和孤儿 running 查询恢复。
+- 策略统计（v1.8.0，只读分析）：对最近 10/20/30 个交易日按当前策略参数做批量回放——逐日拉取「截至当日」的 5m+60m K 线（不泄露未来数据），以 Au99.99 信号道逐 5 分钟重建指标与规则（confirmBars/冷却照常生效），统计各动作（买入准备与止盈止损减仓家族）触发次数、目标命中率、止损触发率、MFE/MAE 与持有至时段末净益，并给出置信分×命中率分箱；报告附口径局限说明（仅 Au99.99 道、分钟覆盖率由 5m K 线推导、合成道采样保真度等）。同参数缓存 1 小时，中途源失败输出部分报告；结果落盘 `storages/dsh-plugin-goldboard/replay-stats.json`。设置页「策略统计」卡片一键生成，双语报表。
 
 ## 数据源
 
@@ -115,7 +116,7 @@ corepack pnpm remove dsh-plugin-goldboard
 - USDCNY：腾讯 `whUSDCNY`
 - 招行积存金：`https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center`（POST `params=[{"prdType":"H","prdCode":""}]`）
 - 品牌金价/积存金（状态页展示）：金投网 `api.jijinhao.com`、京东金融 `api.jdjygold.com`
-- Au99.99 K 线：东财 `push2his.eastmoney.com`，历史可用上金所 `graph/Dailyhq` 兜底
+- Au99.99 K 线：东财 `push2his.eastmoney.com`（被限流时自动切换 `push2delay.eastmoney.com` 延迟镜像，仅取已收盘历史数据），历史可用上金所 `graph/Dailyhq` 兜底
 - XAU/USD 现货 K 线：东财 `push2his.eastmoney.com`；若源不可用则标记为数据不足，不把 Yahoo `GC=F` 期货历史改名为现货
 - GC=F 期货日线诊断：Yahoo Finance `query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d`
 - XAU / 招行积存金分钟线：宿主以轮询报价自建
