@@ -14,6 +14,7 @@ import {
   apply,
   normalizeConfig,
   redactConfig,
+  sectionForSettingsStore,
 } from "../lib/index.js";
 
 // ── fakes ────────────────────────────────────────────────────────────────────
@@ -179,6 +180,19 @@ async function drain(rounds = 30) {
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
 
+/** Remove a temp dir, tolerating late async writes landing mid-unlink. */
+async function rmRetry(dir, attempts = 4) {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (i === attempts - 1) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50 * (i + 1)));
+    }
+  }
+}
+
 function bufferReq(method, payload) {
   const chunks = payload === undefined ? [] : [Buffer.from(JSON.stringify(payload))];
   return {
@@ -222,7 +236,7 @@ async function withPlugin(options, run) {
       }
     }
     await drain(5);
-    await rm(dir, { recursive: true, force: true });
+    await rmRetry(dir);
   }
 }
 
@@ -252,6 +266,34 @@ test("schema marks webhook secrets and redactSecrets strips exactly those paths"
   const paths = redacted.secrets.map((secret) => secret.path.join(".")).sort();
   assert.deepEqual(paths, ["webhooks.dingtalk.secret", "webhooks.feishu.secret"]);
   assert.deepEqual(redacted.secrets.map((secret) => secret.set).sort(), [true, true]);
+});
+
+test("an unset secret resolves absent so wire redaction reports set:false", () => {
+  // No materialized default on role('secret') fields: resolution must omit
+  // them until a value is stored, or every field would look configured.
+  const resolved = SETTINGS_SCHEMA({ webhooks: { feishu: { enabled: true, url: "https://x" } } });
+  assert.equal(resolved.webhooks.feishu.secret, undefined);
+  const redacted = redactSecrets(SETTINGS_SCHEMA, resolved);
+  const byPath = new Map(redacted.secrets.map((secret) => [secret.path.join("."), secret.set]));
+  assert.equal(byPath.get("webhooks.feishu.secret"), false);
+  assert.equal(byPath.get("webhooks.dingtalk.secret"), false);
+
+  const withSecret = SETTINGS_SCHEMA({ webhooks: { feishu: { secret: "abc" } } });
+  const redactedSet = redactSecrets(SETTINGS_SCHEMA, withSecret);
+  const setMap = new Map(redactedSet.secrets.map((secret) => [secret.path.join("."), secret.set]));
+  assert.equal(setMap.get("webhooks.feishu.secret"), true);
+});
+
+test("sectionForSettingsStore drops only empty secret leaves", () => {
+  const section = sectionForSettingsStore(normalizeConfig({
+    webhooks: {
+      feishu: { url: "https://feishu.example/hook", secret: "" },
+      dingtalk: { secret: "keep-me" },
+    },
+  }));
+  assert.equal("secret" in section.webhooks.feishu, false, "empty secret stripped from the store view");
+  assert.equal(section.webhooks.dingtalk.secret, "keep-me", "configured secret kept");
+  assert.equal(section.webhooks.feishu.url, "https://feishu.example/hook", "siblings untouched");
 });
 
 test("apply registers the goldboard namespace once and adopts the resolved value", async () => {
@@ -304,7 +346,11 @@ function bootWithSettings(dir, settings, config = {}) {
 }
 
 test("first boot migrates legacy config.json into the namespace and archives it", async () => {
-  const legacy = { fee: { buyPerGram: 2.5, sellPerGram: 6 }, strategy: { confirmBars: 4 } };
+  const legacy = {
+    fee: { buyPerGram: 2.5, sellPerGram: 6 },
+    strategy: { confirmBars: 4 },
+    webhooks: { feishu: { secret: "" } },
+  };
   const dir = await mkdtemp(join(tmpdir(), "goldboard-plan04-"));
   const settings = createFakeSettings();
   let booted;
@@ -317,13 +363,14 @@ test("first boot migrates legacy config.json into the namespace and archives it"
     assert.ok(replaceWrite, "namespace seeded via wholesale replace");
     assert.equal(replaceWrite.section.fee.buyPerGram, 2.5, "legacy fee survives normalization");
     assert.equal(replaceWrite.section.strategy.confirmBars, 4, "legacy strategy survives normalization");
+    assert.equal("secret" in replaceWrite.section.webhooks.feishu, false, "empty secret not stored as configured");
     assert.equal(existsSync(join(dir, "config.json")), false, "classic file retired…");
     const archived = JSON.parse(await readFile(join(dir, "config.json.migrated"), "utf8"));
     assert.deepEqual(archived, legacy, "…and archived untouched for rollback");
     assert.equal(booted.runtime.config.fee.buyPerGram, 2.5, "runtime adopted the migrated values");
   } finally {
     if (booted) await booted.dispose();
-    await rm(dir, { recursive: true, force: true });
+    await rmRetry(dir);
   }
 });
 
@@ -343,7 +390,7 @@ test("an existing user section is never clobbered by a stale config.json", async
     assert.equal(booted.runtime.config.fee.buyPerGram, 8, "newer settings value kept");
   } finally {
     if (booted) await booted.dispose();
-    await rm(dir, { recursive: true, force: true });
+    await rmRetry(dir);
   }
 });
 
@@ -397,7 +444,7 @@ test("provider mode writes POST /config through the settings service", async () 
     assert.equal(runtime.config.fee.buyPerGram, 7);
   } finally {
     if (booted) await booted.dispose();
-    await rm(dir, { recursive: true, force: true });
+    await rmRetry(dir);
   }
 });
 
@@ -421,7 +468,7 @@ test("a read-only provider falls back to classic persistence", async () => {
     assert.equal(runtime.config.system.enabled, true);
   } finally {
     if (booted) await booted.dispose();
-    await rm(dir, { recursive: true, force: true });
+    await rmRetry(dir);
   }
 });
 
