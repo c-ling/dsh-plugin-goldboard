@@ -1390,7 +1390,8 @@ test("client dictionaries keep zh/en key parity", () => {
     head: { appendChild() {} },
   };
   const requireStub = function (id) {
-    if (id === "react") return { createElement: function () {} };
+    // plan-05: the factory now calls React.memo at module scope (Sparkline).
+    if (id === "react") return { createElement: function () {}, memo: (fn) => fn };
     throw new Error("unexpected require: " + id);
   };
   const clientExports = captured.factory(requireStub);

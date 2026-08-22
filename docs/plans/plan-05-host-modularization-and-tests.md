@@ -94,13 +94,29 @@
 
 ## 测试要求与验证清单
 
-- [ ] 既有单测全部迁移通过（import 路径更新到新模块）
-- [ ] 集成用例 ≥10 全绿；golden-snapshot deep-equal 通过
-- [ ] index.js ≤500 行；每个新模块 ≤900 行；无模块级可变单例（grep 复查）
-- [ ] 宿主真实冒烟：`dsh web` 重启后 curl snapshot/models/bars/replay/manual-cmb-* 全通
-- [ ] 浏览器冒烟：浮窗拖拽/折叠/图表、设置页保存、双语切换、明暗主题、两个对话框 Escape
-- [ ] DESIGN §4 架构图更新为新模块图
+- [x] 既有单测全部迁移通过（import 路径保持 `../lib/index.js`，经 public-api.js 门面再导出）
+- [x] 集成用例 ≥10 全绿（test/integration.test.mjs 11 例）；golden-snapshot deep-equal 通过
+- [x] index.js ≤500 行（497）；每个新模块 ≤900 行（最大 sources.js 873）；
+      无模块级可变单例（熔断/api-log/inflight 收进 SourceRegistry 实例；
+      残留模块级 `__setFetchImpl`/`__setQuoteChainTiming` 为计划 02 的测试接缝，
+      defaultRegistry 为兼容旧测试的惰性垫片，均已注释说明）
+- [ ] 宿主真实冒烟：`dsh web` 重启后 curl snapshot/models/bars/replay/manual-cmb-* 全通（待重启验证）
+- [ ] 浏览器冒烟：浮窗拖拽/折叠/图表、设置页保存、双语切换、明暗主题、两个对话框 Escape（待浏览器验证）
+- [x] DESIGN §4 架构图更新为新模块图
+
+### 开放问题裁决（执行记录）
+
+- **client-modules 不支持同包多 client bundle**：扫描器硬编码 `exports["./client"]`
+  （clientExportOf/graphRow/serveBundle/HMR watch 全链路），已装插件零反例。
+  → B 部分维持 client.js 单文件内重构；词典 parity 测试升级为结构断言
+  （reason_/hint_/evidence_ 三族键 1:1 + 派生视图检查）。
+- **inject 裁决（P2#24）**：llm 平台必有（插件以硬注入在 web profile 实际运行），
+  → 保留硬注入 `inject = ["webServer","llm"]`，删除 `ctx.llm ?? ctx.get?.("llm")` 双路。
+- **实际拆分文件**：plan 表 8 个目标之外增补 config.js / parsers.js / bars.js /
+  sizing.js / spread-stats.js / history.js / shared.js / public-api.js
+  （行号漂移 + ≤900 行硬约束所致）；sources.js 中纯解析器独立成 parsers.js。
 
 ## 完成定义
 
-- [ ] 全部勾选；版本 `v1.6.0` 发布（Release notes 注明纯重构、无行为变化、golden 快照等价）
+- [ ] 全部勾选；版本按顺延规则发布 `v1.7.0`（plan-04 已占用 v1.6.0；
+      Release notes 注明纯重构、无行为变化、golden 快照等价）

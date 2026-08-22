@@ -9,8 +9,10 @@ import test from "node:test";
 const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
 
 function loadChartHelpers() {
+  // plan-05: the reason labels moved into DICT, so the slice now ends at the
+  // locale helper that follows the chart block.
   const startMarker = "// ── Beijing wall-clock formatting (hoisted formatter + bounded memo) ──";
-  const endMarker = "var REASON_LABELS";
+  const endMarker = "function isChineseLocale";
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker);
   assert.ok(start > 0 && end > start, "chart helper block found in lib/client.js");

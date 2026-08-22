@@ -70,3 +70,30 @@ test("EN dictionary values contain no Chinese characters", () => {
     .map(([key, value]) => `${key}: ${value}`);
   assert.deepEqual(residues, []);
 });
+
+// ── plan-05 upgrades ─────────────────────────────────────────────────────────
+
+test("reason/hint/evidence families are complete, bilingual and non-empty", () => {
+  const dict = loadDict();
+  for (const prefix of ["reason_", "hint_", "evidence_"]) {
+    const zhKeys = Object.keys(dict.zh).filter((key) => key.startsWith(prefix)).sort();
+    const enKeys = Object.keys(dict.en).filter((key) => key.startsWith(prefix)).sort();
+    assert.deepEqual(enKeys, zhKeys, `${prefix}* keys match 1:1`);
+    assert.ok(zhKeys.length > 0, `${prefix}* family is populated (${zhKeys.length})`);
+    for (const key of zhKeys) {
+      assert.equal(typeof dict.zh[key], "string");
+      assert.ok(dict.zh[key].length > 0, `${key} zh value non-empty`);
+      assert.equal(typeof dict.en[key], "string");
+      assert.ok(dict.en[key].length > 0, `${key} en value non-empty`);
+      assert.ok(!/\p{Script=Han}/u.test(dict.en[key]), `${key} en value has no Chinese`);
+    }
+  }
+});
+
+test("standalone label maps are derived views, not duplicated sources", () => {
+  // plan-05 B.6: REASON_LABELS / ANALYSIS_ENUM_HINTS must be derived from
+  // DICT (single source of truth) — the old literal blocks are gone.
+  assert.equal(/var REASON_LABELS = \{\s*zh: \{/.test(source), false, "REASON_LABELS is no longer a literal map");
+  assert.equal(/var ANALYSIS_ENUM_HINTS = \{\s*zh: \{/.test(source), false, "ANALYSIS_ENUM_HINTS is no longer a literal map");
+  assert.ok(/dictPrefixedView\(DICT\.zh, "reason_"\)/.test(source), "REASON_LABELS derives from DICT");
+});

@@ -82,7 +82,7 @@
 ## 4. 总体架构
 
 ```
-┌────────────────────────── 浏览器半（lib/client.js）──────────────────────────┐
+┌──────────── 浏览器半（lib/client.js 单文件内重构，plan-05 B 部分）─────────────┐
 │                                                                              │
 │  shell.overlay（list / root scope）                                          │
 │    GoldBoardOverlay：右上角可拖拽；收起为小圆球 ⇄ 展开浮窗卡                     │
@@ -101,24 +101,34 @@
 └──────────────────────────────────┬───────────────────────────────────────────┘
                                    │ HTTP（webServer，同源）
 ┌──────────────────────────────────▼───────────────────────────────────────────┐
-│                          宿主半（lib/index.js）                                │
+│                     宿主半（plan-05 模块拆分，index.js 为组合根）                │
 │                                                                              │
-│  行情采集器（免费源，多源容错）                                                 │
+│  lib/index.js（组合根 ≤500 行）：apply() 接线 runtime/settings 缝/tick 循环/     │
+│  路由注册；公开面经 lib/public-api.js 再导出保持不变                              │
+│                                                                              │
+│  lib/sources.js  SourceRegistry 实例（每 apply 一个，消灭模块级单例）：          │
+│                  传输 fetch 注入点、报价链预算、熔断、60s 去重、api-log 流       │
+│  lib/parsers.js  各免费源纯解析器（新浪/腾讯/东财/SGE/60s/gold-api/Yahoo/CMB）   │
 │    Au99.99 报价：新浪 gds_AU9999 / 东财 118.AU9999                             │
-│    XAU 现货：  新浪/腾讯 hf_XAU                                                │
-│    USDCNY：   腾讯 whUSDCNY                                                   │
-│    K 线：     东财 118.AU9999（5/15/60/日线）；XAU 日线（新浪）+ 现货轮询自建分钟线 │
-│    - 30s 报价轮询，K 线增量补齐，指数退避，来源熔断，磁盘缓存                      │
+│    XAU 现货：  腾讯/新浪 hf_XAU；USDCNY：腾讯 whUSDCNY                          │
+│  lib/market-time.js  北京时区日历、交易时段、覆盖窗口                            │
+│  lib/indicators.js   SMA/EMA、Wilder RSI/ATR、MACD、布林带、5m→10/30m 重采样；    │
+│                      只用收盘 K 线，输出 calculationVersion/warmupReady         │
+│  lib/bars.js         bar 生命周期：recordTick/merge/aggregate/种子迁移/手工 CMB  │
+│  lib/sizing.js       仓位分档、建议单工厂（三处字面量合一）、确认/冷却策略        │
+│  lib/spread-stats.js 动态招行价差样本 + 内外盘溢价 σ 统计                        │
+│  lib/plan.js         computePlan 四阶段流水线（选道→指标→持仓分支→空仓分支）；      │
+│                      5/10 分钟覆盖率 >80%、30/60 分钟 >60% 才出建议              │
+│  lib/history.js      K 线种子与缺口回填作业                                     │
+│  lib/alerts.js       消息模板、系统通知（osascript/notify-send/PowerShell）、     │
+│                      Webhook 渠道、dispatchAlert、告警边沿评估                   │
+│  lib/snapshot.js     /snapshot 视图 + /replay 确定性回放（黄金快照回归锚点）       │
+│  lib/routes.js       route() 助手（方法分发/405/413/错误信封）+ 全部路径表        │
+│  lib/store.js        原子写队列、分区脏标记 StatePersister、ApiLogStore           │
+│  lib/config.js       默认值/归一化/密钥脱敏/补丁合并 + plan-04 设置 schema        │
 │                                                                              │
-│  指标引擎：SMA/EMA、Wilder RSI/ATR、MACD、布林带、近期支撑/阻力；只用收盘 K 线 │
-│            输出 calculationVersion、warmupReady、synthetic 和口径元数据         │
-│  质量/回放：Quote/Bar 规范化、OHLC/重复桶/覆盖率/stale/warm-up 检查、固定回放      │
-│  策略引擎：持仓/上限/手续费/招行价差 → 回本价、建议买卖价、建议克数、止损参考     │
-│            （5/10 分钟覆盖率 >80%、30/60 分钟 >60% 才出建议）                    │
-│  分析引擎：ctx.llm 目录 → prepareCall → stream → JSON/schema → 脱敏 JSONL       │
-│  提醒引擎：阈值穿越边沿触发（无冷却、无勿扰）+ 交易时段抑制                     │
-│  通知引擎：系统通知（osascript / notify-send / PowerShell）、Webhook            │
-│  持久化：$DSH_HOME/storages/dsh-plugin-goldboard/{config,state,cache}.json     │
+│  持久化：$DSH_HOME/storages/dsh-plugin-goldboard/{config,state}.json           │
+│            + api-log.jsonl + alerts-log.jsonl                                  │
 │            + analysis-log.jsonl（started/finished，保留/分页/脱敏）              │
 │                                                                              │
 │  路由（每个路径注册一次，内部按 method 分发）：                                  │
