@@ -21,6 +21,10 @@ import {
   buildAlertMessage,
     buildOrderChangeMessage,
     sameSuggestedOrder,
+  buildOrderDriftNote,
+  classifyOrderTransition,
+  ORDER_UPDATE_MIN_DELTA_PER_GRAM,
+  runAlertEvaluation,
   buildSnapshot,
   computeMarketState,
   computeNextMarketOpen,
@@ -52,6 +56,7 @@ import {
   readApiLogsFromFile,
   redactConfig,
   resampleBars,
+  restoreRuntimeState,
   rotateApiLogIfNeeded,
   rsi,
   seedBars,
@@ -71,6 +76,23 @@ function oneMinBars(now, minutes = 60, price = 950) {
   const out = [];
   for (let i = 0; i < minutes; i += 1) {
     out.push({ t: end - i * 60_000, o: price, h: price, l: price, c: price });
+  }
+  return out;
+}
+
+/**
+ * Full coverage for the freshest `freshMinutes`, then every third minute.
+ * Gaps stay ≤2 consecutive minutes so coverage-seam anchoring never fires and
+ * the ratios reflect plain rolling windows (used by tests that need a
+ * sub-threshold long window without simulating an outage).
+ */
+function thinnedOneMinBars(now, total, freshMinutes, price = 950) {
+  const end = Math.floor(new Date(now).getTime() / 60_000) * 60_000;
+  const out = [];
+  for (let i = 0; i < total; i += 1) {
+    if (i < freshMinutes || (i - freshMinutes) % 3 === 0) {
+      out.push({ t: end - i * 60_000, o: price, h: price, l: price, c: price });
+    }
   }
   return out;
 }
@@ -943,6 +965,42 @@ test("coverage gate requires >80% for 5/10m and >60% for 30/60m valid per-minute
   assert.deepEqual(gateStrict.failing, [60]);
 });
 
+test("coverage re-anchors below an outage seam instead of staying poisoned", () => {
+  // 2026-08-25 morning blackout shape: a ≥8-minute contiguous hole (host
+  // asleep / source down), then quotes resume. The trailing windows must be
+  // measured over the post-seam segment only — a 55-minute hole used to keep
+  // the 60m gate red for another full hour after data had recovered.
+  const now = new Date("2026-08-14T02:40:00Z");
+  const config = {}; // resolved through the same calendar defaults as production
+  const fresh = oneMinBars(now, 6); // only the newest 6 minutes carry bars
+
+  // Long windows re-anchor to the seam: 6/6 fresh minutes → fully covered.
+  assert.equal(windowCoverage(fresh, now, 60, config), 1);
+  assert.equal(windowCoverage(fresh, now, 30, config), 1);
+  const gate = coverageGate(fresh, now, [5, 10, 30, 60], config);
+  // Only the 10m window still counts its rolling seam tail (6/10 = 0.6); the
+  // long windows are already green right after quotes resume.
+  assert.deepEqual(gate.failing, [10]);
+  assert.equal(gate.coverage[60], 1);
+  assert.equal(gate.coverage[10], 0.6);
+  // With ten fresh minutes every window is green immediately.
+  const gateTen = coverageGate(oneMinBars(now, 10), now, [5, 10, 30, 60], config);
+  assert.equal(gateTen.ok, true);
+  assert.deepEqual(gateTen.failing, []);
+
+  // Short windows never scan far enough back to complete the seam run, so the
+  // seam tail is still counted inside them (conservative by design): 6/10.
+  assert.equal(windowCoverage(fresh, now, 10, config), 0.6);
+
+  // An ongoing outage stays red: every scanned slot is missing.
+  assert.equal(windowCoverage([], now, 30, config), 0);
+  assert.equal(coverageGate([], now, [5, 10, 30, 60], config).ok, false);
+
+  // Scattered single-minute blips are not seams: ratio reflects them as before.
+  const blip = oneMinBars(now, 60).filter((bar) => bar.t !== Math.floor(now.getTime() / 60_000) * 60_000 - 3 * 60_000);
+  assert.equal(windowCoverage(blip, now, 10, config), 0.9);
+});
+
 test("resampleBars aggregates 5m bars into 10m/30m bars", () => {
   const end = Date.parse("2026-08-14T02:00:00Z"); // on both 5m and 10m boundaries
   const bars5 = [];
@@ -982,7 +1040,7 @@ test("plan engine withholds suggestions when 30/60m coverage is below 60%", () =
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: oneMinBars(now, 30), 5: [], 60: [] },
+      XAU: { 1: thinnedOneMinBars(now, 60, 14), 5: [], 60: [] },
       CMB: { 1: [], 5: [], 60: [] },
     },
   };
@@ -1042,7 +1100,7 @@ test("snapshot exposes data coverage alongside an incomplete plan", () => {
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: oneMinBars(now, 30), 5: [] },
+      XAU: { 1: thinnedOneMinBars(now, 60, 14), 5: [] },
       CMB: { 1: [], 5: [] },
     },
     plan: null,
@@ -1097,16 +1155,18 @@ test("plan engine checks only 5/10m coverage during the first hour of a session"
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: oneMinBars(now, 30), 5: [], 60: [] },
+      XAU: { 1: thinnedOneMinBars(now, 60, 14), 5: [], 60: [] },
       CMB: { 1: [], 5: [], 60: [] },
     },
   };
   const plan = computePlan(runtime, DEFAULT_CONFIG, now);
-  // The 60m window is only 50% covered, but 30/60m are not validated during
-  // the warm-up hour; the plan proceeds (wait) instead of data_incomplete.
+  // The 60m window is only ~67% covered (the seam at yesterday's session end
+  // truncates the scanned slots to today's segment), but 30/60m are not
+  // validated during the warm-up hour; the plan proceeds (wait) instead of
+  // data_incomplete.
   assert.equal(plan.action, "wait");
   assert.ok(!plan.reasonCodes.some((code) => code.startsWith("data_incomplete")));
-  assert.equal(plan.dataCoverage[60], 0.5);
+  assert.equal(plan.dataCoverage[60], 0.67);
   assert.equal(plan.dataCoverage[5], 1);
 });
 
@@ -1148,7 +1208,7 @@ test("plan engine checks only 5/10m coverage during the daily 00:00-01:00 Beijin
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: oneMinBars(now, 30), 5: [], 60: [] },
+      XAU: { 1: thinnedOneMinBars(now, 60, 14), 5: [], 60: [] },
       CMB: { 1: [], 5: [], 60: [] },
     },
   };
@@ -1200,7 +1260,7 @@ test("plan engine does not relax 30/60m coverage after 01:00 Beijing", () => {
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: oneMinBars(now, 30), 5: [], 60: [] },
+      XAU: { 1: thinnedOneMinBars(now, 60, 14), 5: [], 60: [] },
       CMB: { 1: [], 5: [], 60: [] },
     },
   };
@@ -1366,6 +1426,327 @@ test("sameSuggestedOrder ignores rolling validUntil and detects price changes", 
   assert.equal(sameSuggestedOrder(a, b), true);
   assert.equal(sameSuggestedOrder(a, { ...b, cmbEstimatedPrice: 974.2 }), false);
   assert.equal(sameSuggestedOrder(a, null), false);
+});
+
+// ── v1.9.0: suggested-order lifecycle (hold instead of instant cancel) ──────
+
+const ORDER_NOW = new Date("2026-08-13T17:40:00Z");
+// Anchored to the real clock: runAlertEvaluation classifies with `new Date()`,
+// so a hard-coded future stamp would silently count as expired one day.
+const FUTURE_VALID = new Date(Date.now() + 60 * 60_000).toISOString();
+
+function buyOrder(overrides = {}) {
+  return {
+    side: "buy",
+    action: "buy_setup",
+    instrument: "XAU",
+    signalPrice: 949,
+    cmbEstimatedPrice: 950.7,
+    grams: 10,
+    validUntil: FUTURE_VALID,
+    issuedAt: new Date(ORDER_NOW.getTime() - 60_000).toISOString(),
+    issuedPositionGrams: 0,
+    ...overrides,
+  };
+}
+
+test("classifyOrderTransition holds the order through benign wait evaluations", () => {
+  const plan = { action: "wait", reasonCodes: ["cooldown_active"], marketState: "open", signalPrice: 950 };
+  // Cooldown / confirmation flip right after issuance: |950 − 949| = 1 CNY/g is
+  // far below the default 0.5 % drift threshold (≈4.75) → hold, never cancel.
+  assert.equal(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan, now: ORDER_NOW }).event, "hold");
+  const dataGap = { action: "data_incomplete", reasonCodes: ["data_incomplete_30m"], marketState: "open", signalPrice: 951 };
+  assert.equal(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: dataGap, now: ORDER_NOW }).event, "hold");
+});
+
+test("classifyOrderTransition reaffirms near-identical re-suggestions as refresh", () => {
+  const plan = { action: "buy_setup", marketState: "open", signalPrice: 950 };
+  const current = { ...buyOrder(), cmbEstimatedPrice: 951.0, validUntil: "2026-08-13T19:00:00.000Z" };
+  assert.ok(Math.abs(951.0 - 950.7) < ORDER_UPDATE_MIN_DELTA_PER_GRAM);
+  assert.equal(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: current, plan, now: ORDER_NOW }).event, "refresh");
+  assert.equal(sameSuggestedOrder(buyOrder(), current), false, "sanity: raw comparator would call it an update");
+});
+
+test("classifyOrderTransition updates on material price/grams/side changes", () => {
+  const plan = { action: "buy_setup", marketState: "open", signalPrice: 950 };
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: { ...buyOrder(), cmbEstimatedPrice: 953 }, plan, now: ORDER_NOW }).event,
+    "update",
+  );
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: { ...buyOrder(), grams: 6 }, plan, now: ORDER_NOW }).event,
+    "update",
+  );
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: { ...buyOrder(), side: "sell", action: "sell_take_profit" }, plan, now: ORDER_NOW }).event,
+    "update",
+  );
+});
+
+test("classifyOrderTransition cancels only on conflict/supersede and drift", () => {
+  // Opposite-direction emergency exit while a buy order stands.
+  const stop = { action: "sell_stop", marketState: "open", signalPrice: 900 };
+  assert.deepEqual(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: stop, now: ORDER_NOW }), { event: "cancel", cause: "conflict" });
+  // Same-side directional evaluation without a fresh order (e.g. no_budget).
+  const superseded = { action: "buy_setup", marketState: "open", signalPrice: 950 };
+  assert.deepEqual(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: superseded, now: ORDER_NOW }), { event: "cancel", cause: "superseded" });
+  // Market drifted ≥ orderRepricePct away from the limit.
+  const drifted = { action: "wait", reasonCodes: ["trigger_not_confirmed"], marketState: "open", signalPrice: 956 };
+  assert.equal(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: drifted, now: ORDER_NOW }).event, "cancel_drift");
+  // A tighter custom threshold drifts at the same distance.
+  const waitPlan = { action: "wait", marketState: "open", signalPrice: 950 };
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: waitPlan, repricePct: 0.05, now: ORDER_NOW }).event,
+    "cancel_drift",
+    "|950−949|=1 ≥ 949×0.05%",
+  );
+});
+
+test("classifyOrderTransition clears silently on fill, expiry and close", () => {
+  assert.equal(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: { action: "wait", marketState: "open" }, positionGrams: 12, now: ORDER_NOW }).event, "clear_fill");
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder({ side: "sell", action: "sell_take_profit", issuedPositionGrams: 10 }), currentOrder: null, plan: { action: "wait", marketState: "open" }, positionGrams: 6, now: ORDER_NOW }).event,
+    "clear_fill",
+  );
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder({ validUntil: new Date(Date.now() - 60_000).toISOString() }), currentOrder: null, plan: { action: "wait", marketState: "open", signalPrice: 949 }, now: new Date() }).event,
+    "clear_expired",
+  );
+  assert.equal(classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: null, plan: { action: "market_closed", marketState: "closed" }, now: ORDER_NOW }).event, "clear_closed");
+  // No fill detection without a recorded baseline (legacy stored orders).
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder({ issuedPositionGrams: undefined }), currentOrder: null, plan: { action: "wait", marketState: "open", signalPrice: 949 }, positionGrams: 999, now: ORDER_NOW }).event,
+    "hold",
+  );
+});
+
+function alertHarness(plan, order, config = {}) {
+  const runtime = {
+    plan,
+    config: normalizeConfig(config),
+    localeHint: "zh",
+    alertState: {},
+    lastSuggestedOrder: order,
+  };
+  const dispatched = [];
+  return {
+    runtime,
+    dispatched,
+    io: {
+      async dispatchAlert(message) { dispatched.push(message); return []; },
+      async logAlert() {},
+    },
+  };
+}
+
+test("runAlertEvaluation keeps the suggestion through cooldown waits without cancel prompts", async () => {
+  const plan = { action: "wait", reasonCodes: ["cooldown_active"], marketState: "open", signalPrice: 950 };
+  const { runtime, dispatched, io } = alertHarness(plan, buyOrder());
+  await runAlertEvaluation(runtime, io);
+  assert.equal(dispatched.length, 0, "no cancel/update alert while the order merely waits to fill");
+  assert.ok(runtime.lastSuggestedOrder, "outstanding suggestion survives the wait tick");
+});
+
+test("runAlertEvaluation sends one drift-cancel notice with the deviation note", async () => {
+  const plan = { action: "wait", reasonCodes: ["trigger_not_confirmed"], marketState: "open", signalPrice: 956 };
+  const first = alertHarness(plan, buyOrder());
+  await runAlertEvaluation(first.runtime, first.io);
+  assert.equal(first.dispatched.length, 1);
+  assert.equal(first.dispatched[0].action, "cancel_order");
+  assert.match(first.dispatched[0].body, /已偏离原挂单价/);
+  assert.match(first.dispatched[0].body, /现价 956 元\/克/);
+  assert.equal(first.runtime.lastSuggestedOrder, null);
+  // Second identical tick: nothing left to cancel → no repeat.
+  await runAlertEvaluation(first.runtime, first.io);
+  assert.equal(first.dispatched.length, 1);
+});
+
+test("runAlertEvaluation clears the order silently when the position filled", async () => {
+  const plan = { action: "wait", reasonCodes: ["trigger_not_confirmed"], marketState: "open", signalPrice: 950 };
+  const { runtime, dispatched, io } = alertHarness(plan, buyOrder(), { position: { lots: [{ id: "a", grams: 12, price: 950.7 }] } });
+  await runAlertEvaluation(runtime, io);
+  assert.equal(dispatched.length, 0, "fill detection never spams the user");
+  assert.equal(runtime.lastSuggestedOrder, null);
+});
+
+test("runAlertEvaluation records issuance stamps for brand-new suggestions", async () => {
+  const order = { side: "buy", action: "buy_setup", instrument: "XAU", signalPrice: 949, cmbEstimatedPrice: 950.7, grams: 10 };
+  const plan = { action: "buy_setup", marketState: "open", signalPrice: 948, suggestedOrder: order };
+  const { runtime, dispatched, io } = alertHarness(plan, null);
+  await runAlertEvaluation(runtime, io);
+  assert.equal(dispatched.length, 1, "new suggestion still fires its edge alert");
+  assert.equal(runtime.lastSuggestedOrder.side, "buy");
+  assert.equal(runtime.lastSuggestedOrder.issuedPositionGrams, 0, "baseline captured for fill detection");
+  assert.ok(typeof runtime.lastSuggestedOrder.issuedAt === "string");
+});
+
+// ── v1.9.x: same-shape repricing storms are damped ──────────────────────────
+// Observed 2026-08-25 01:44–02:00: a live sell-side suggestion re-alerted
+// `order_updated` ~35 times in 16 minutes because every CMB tick moved the
+// suggested limit ≥ ORDER_UPDATE_MIN_DELTA_PER_GRAM. Same-shape repricing must
+// stay silent inside a quiet window and only escalate on large cumulative drift.
+
+function sellOrder(overrides = {}) {
+  return buyOrder({
+    side: "sell",
+    action: "sell_take_profit",
+    cmbEstimatedPrice: 1000,
+    issuedAt: new Date(ORDER_NOW.getTime() - 5 * 60_000).toISOString(),
+    ...overrides,
+  });
+}
+
+test("classifyOrderTransition damps same-shape repricing inside the quiet window", () => {
+  const plan = { action: "sell_take_profit", marketState: "open", signalPrice: 1005 };
+  // Stamped 60s ago: jitter +0.6 (≥ reaffirm step) is adopted silently.
+  const prev = sellOrder({ updatedAt: new Date(ORDER_NOW.getTime() - 60_000).toISOString(), alertedPrice: 1000 });
+  const jittered = { ...prev, cmbEstimatedPrice: 1000.6 };
+  assert.equal(
+    classifyOrderTransition({ previousOrder: prev, currentOrder: jittered, plan, now: ORDER_NOW }).event,
+    "refresh",
+    "quiet-window repricing below the escalation drift never alerts",
+  );
+  // Cumulative drift from the LAST NOTIFIED price escalates immediately.
+  assert.equal(
+    classifyOrderTransition({ previousOrder: prev, currentOrder: { ...prev, cmbEstimatedPrice: 997 }, plan, now: ORDER_NOW }).event,
+    "update",
+    "|997 − 1000| = 3 CNY/g reaches the escalation threshold",
+  );
+});
+
+test("classifyOrderTransition notifies again once the quiet window has elapsed", () => {
+  const plan = { action: "sell_take_profit", marketState: "open", signalPrice: 1005 };
+  const prev = sellOrder({ updatedAt: new Date(ORDER_NOW.getTime() - 11 * 60_000).toISOString(), alertedPrice: 1000 });
+  assert.equal(
+    classifyOrderTransition({ previousOrder: prev, currentOrder: { ...prev, cmbEstimatedPrice: 1000.6 }, plan, now: ORDER_NOW }).event,
+    "update",
+    "past the quiet interval even a modest step notifies",
+  );
+});
+
+test("classifyOrderTransition still updates legacy orders without damping stamps", () => {
+  // Orders stored before v1.9.x carry no updatedAt/alertedPrice; behaviour for
+  // them is unchanged (notify), and the first stamp re-arms damping.
+  const plan = { action: "buy_setup", marketState: "open", signalPrice: 950 };
+  assert.equal(
+    classifyOrderTransition({ previousOrder: buyOrder(), currentOrder: { ...buyOrder(), cmbEstimatedPrice: 953 }, plan, now: ORDER_NOW }).event,
+    "update",
+  );
+});
+
+test("runAlertEvaluation caps a repricing storm at one notice per quiet window", async () => {
+  const mkPlan = (price) => ({
+    action: "sell_take_profit",
+    reasonCodes: ["target_reached"],
+    marketState: "open",
+    signalPrice: 1005,
+    suggestedOrder: {
+      side: "sell", action: "sell_take_profit", instrument: "XAU", signalPrice: 1005,
+      cmbEstimatedPrice: price, grams: 6, validUntil: FUTURE_VALID,
+    },
+  });
+  const harness = alertHarness(mkPlan(1000), null);
+  await runAlertEvaluation(harness.runtime, harness.io); // initial edge alert + stamp
+  assert.equal(harness.dispatched.length, 1);
+  const stamped = harness.runtime.lastSuggestedOrder;
+  assert.ok(stamped.updatedAt && Number.isFinite(Number(stamped.alertedPrice)), "issuance stamps include updatedAt/alertedPrice");
+
+  harness.runtime.plan = mkPlan(1000.6);
+  await runAlertEvaluation(harness.runtime, harness.io); // +0.6 → damped refresh
+  harness.runtime.plan = mkPlan(999.9);
+  await runAlertEvaluation(harness.runtime, harness.io); // −0.7 → damped refresh
+  assert.equal(harness.dispatched.length, 1, "jitter inside the quiet window stays silent");
+  assert.equal(harness.runtime.lastSuggestedOrder.alertedPrice, 1000, "notified price pinned across silent refreshes");
+  assert.equal(harness.runtime.lastSuggestedOrder.updatedAt, stamped.updatedAt, "quiet-window origin preserved");
+
+  harness.runtime.plan = mkPlan(996.8);
+  await runAlertEvaluation(harness.runtime, harness.io); // |Δ| = 3.2 vs notified → escalate
+  assert.equal(harness.dispatched.length, 2);
+  assert.equal(harness.dispatched[1].action, "order_updated");
+  assert.equal(harness.runtime.lastSuggestedOrder.cmbEstimatedPrice, 996.8);
+  assert.equal(harness.runtime.lastSuggestedOrder.alertedPrice, 996.8, "escalation re-pins the notified price");
+});
+
+// ── v1.9.0: session-end forced close is opt-in ──────────────────────────────
+
+function nearCloseRuntime(now) {
+  return {
+    quotes: {
+      AU9999: { price: 946, bid: 945.8, ask: 946.2, source: "sina", updatedAt: now.getTime() },
+      XAU: { price: 4357, source: "tencent", updatedAt: now.getTime() },
+      USDCNY: { price: 6.74, source: "tencent", updatedAt: now.getTime() },
+    },
+    bars: {
+      AU9999: { 1: [], 5: [], 60: [] },
+      XAU: { 1: oneMinBars(now, 60), 5: [], 60: [] },
+    },
+  };
+}
+
+test("last 30 minutes no longer force close_by_session_end by default", () => {
+  // 01:40 Beijing (20 minutes before the 26:00 close).
+  const now = new Date("2026-08-13T17:40:00Z");
+  const config = normalizeConfig({
+    position: { grams: 10, avgCostPerGram: 945 },
+    limits: { maxGrams: 100 },
+    strategy: { confirmBars: 1, signalCooldownMinutes: 0 },
+  });
+  const plan = computePlan(nearCloseRuntime(now), config, now);
+  assert.notEqual(plan.action, "close_by_session_end", "default config has no intraday-close bias");
+  assert.ok(!plan.reasonCodes.includes("session_ending"));
+});
+
+test("opting in restores the pre-close full-close nudge", () => {
+  const now = new Date("2026-08-13T17:40:00Z");
+  const config = normalizeConfig({
+    position: { grams: 10, avgCostPerGram: 945 },
+    limits: { maxGrams: 100 },
+    strategy: { confirmBars: 1, signalCooldownMinutes: 0, closeBySessionEnd: true },
+  });
+  const plan = computePlan(nearCloseRuntime(now), config, now);
+  assert.equal(plan.action, "close_by_session_end");
+  assert.ok(plan.reasonCodes.includes("session_ending"));
+  assert.equal(plan.suggestedOrder.side, "sell");
+});
+
+// ── v1.9.0: persisted quotes survive host restarts (no "-" board after boot) ─
+
+test("restoreRuntimeState folds last known quotes back into the runtime", () => {
+  const runtime = { quotes: { AU9999: null, XAU: null, GCF: null, USDCNY: null, CMB: null } };
+  const at = Date.now() - 60_000;
+  restoreRuntimeState(runtime, {
+    quotes: {
+      AU9999: { price: 1001, bid: 1000.8, ask: 1001.2, source: "sina", updatedAt: at },
+      XAU: { price: 4640.39, source: "tencent", updatedAt: at },
+      USDCNY: { price: 6.7214, source: "tencent", updatedAt: at },
+      CMB: null,
+      // Error markers written by setQuoteError must not resurrect as zero rows.
+      GCF: { price: 0, source: "error", error: true, stale: true, updatedAt: at },
+    },
+  });
+  assert.equal(runtime.quotes.AU9999.price, 1001);
+  assert.equal(runtime.quotes.XAU.price, 4640.39);
+  assert.equal(runtime.quotes.USDCNY.price, 6.7214);
+  assert.equal(runtime.quotes.CMB, null);
+  assert.equal(runtime.quotes.GCF, null, "zero/error markers are dropped");
+});
+
+test("a restarted host renders numbers instead of dashes on the first snapshot", () => {
+  const runtime = { quotes: { AU9999: null, XAU: null, GCF: null, USDCNY: null, CMB: null } };
+  restoreRuntimeState(runtime, {
+    quotes: {
+      XAU: { price: 4640.39, market: "spot", instrument: "XAU", source: "tencent", updatedAt: Date.now() - 30_000 },
+      USDCNY: { price: 6.7214, source: "tencent", updatedAt: Date.now() - 30_000 },
+    },
+  });
+  const snap = buildSnapshot(runtime, DEFAULT_CONFIG, new Date());
+  assert.equal(snap.ok, true);
+  assert.equal(snap.quotes.XAU.price, 4640.39);
+  assert.equal(
+    snap.derived && snap.derived.cmb && Number.isFinite(Number(snap.derived.cmb.buyPrice)),
+    true,
+    "the CMB fallback estimate works immediately after a restart",
+  );
 });
 
 

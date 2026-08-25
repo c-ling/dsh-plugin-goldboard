@@ -663,13 +663,14 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   const h = await boot({ config: {} });
   t.after(() => h.dispose());
 
-  const started = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2 } });
+  const started = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999" } });
   assert.equal(started.status, 200);
   assert.equal(started.body.ok, true);
   assert.equal(started.body.cached, false);
   const report = started.body.report;
-  assert.equal(report.version, 1);
+  assert.equal(report.version, 2);
   assert.equal(report.params.days, 2);
+  assert.equal(report.params.lane, "au9999");
   assert.equal(report.daysRequested, 2);
   assert.equal(report.daysEvaluated, 2);
   assert.deepEqual(report.window, { from: "2026-08-13", to: "2026-08-14" });
@@ -682,7 +683,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(dayPulls.length, 4);
 
   // Same-window repeat → TTL cache; GET serves the same report idempotently.
-  const again = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2 } });
+  const again = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999" } });
   assert.equal(again.body.cached, true);
   assert.deepEqual(again.body.report, report);
   const fetched = await h.call("/dsh-plugin-goldboard/replay-stats", "GET", { url: "/dsh-plugin-goldboard/replay-stats?detail=true" });
@@ -692,7 +693,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
 
   // Report persisted next to state.json.
   const persisted = JSON.parse(await readFile(join(h.dir, "replay-stats.json"), "utf8"));
-  assert.equal(persisted.report.version, 1);
+  assert.equal(persisted.report.version, 2);
 });
 
 test("integration: mid-window source failure surfaces as a partial report on the route", async (t) => {
@@ -707,7 +708,7 @@ test("integration: mid-window source failure surfaces as a partial report on the
 
   const h = await boot({ config: {} });
   t.after(() => h.dispose());
-  const result = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2 } });
+  const result = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999" } });
   assert.equal(result.status, 200);
   assert.equal(result.body.ok, true);
   assert.equal(result.body.report.daysEvaluated, 1);

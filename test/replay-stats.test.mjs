@@ -219,7 +219,9 @@ test("aggregateReplayReport produces exact per-action counts, rates and buckets"
 test("replayTradingDay is deterministic: identical fixtures produce identical reports", () => {
   const bars5 = buildBars(TWO_DAYS);
   const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
-  const config = {};
+  // v1.9.0: the forced session-end close is gated by strategy.closeBySessionEnd
+  // (default off) — enable it here so this fixture keeps covering the mechanism.
+  const config = { strategy: { closeBySessionEnd: true } };
   const first = replayTradingDay("2026-08-14", bars5, bars60, config);
   const second = replayTradingDay("2026-08-14", bars5, bars60, config);
   assert.deepEqual(second, first);
@@ -242,6 +244,18 @@ test("replayTradingDay is deterministic: identical fixtures produce identical re
     assert.equal(event.outcome.costPerGram, 5.4); // 0 + 5 fee + 0.2 spread + 0.2 slip (defaults)
     assert.ok(event.day === "2026-08-14");
   }
+});
+
+test("session-end forced close is disabled by default (no intraday-close bias)", () => {
+  const bars5 = buildBars(TWO_DAYS);
+  const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
+  const first = replayTradingDay("2026-08-14", bars5, bars60, {});
+  assert.equal(first.steps, BARS_PER_DAY * 2);
+  const byAction = {};
+  for (const event of first.events) byAction[event.action] = (byAction[event.action] ?? 0) + 1;
+  assert.equal(byAction.close_by_session_end ?? 0, 0, "default config never nudges session-end exits");
+  // The rest of the engine still evaluates every step.
+  assert.ok(first.events.length > 0, "other tracked actions still fire under the default config");
 });
 
 // ── 4. engine: fetch-once, cache, failure, cancel, persistence ──────────────
@@ -285,7 +299,7 @@ async function createTempEngineHarness({ failingDay = null } = {}) {
 test("engine: deterministic report, per-day fetch memo and TTL cache", async () => {
   const h = await createTempEngineHarness();
   try {
-    const first = await h.engine.run({ days: 2, now: FRIDAY_NOON });
+    const first = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
     assert.equal(first.ok, true);
     assert.equal(first.cached, false);
     // Exactly one 5m + one 60m request per day — point-in-time, no lookahead.
@@ -297,14 +311,14 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
     assert.equal(first.report.window.from, "2026-08-13");
 
     // Same params inside the TTL → cached envelope, zero extra requests.
-    const cached = await h.engine.run({ days: 2, now: FRIDAY_NOON });
+    const cached = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
     assert.equal(cached.cached, true);
     assert.deepEqual(cached.report, first.report);
     assert.equal(h.calls.length, 4);
 
     // force=true recomputes but the process-lifetime day memo still serves
     // already-fetched days without touching the source again.
-    const forced = await h.engine.run({ days: 2, force: true, now: FRIDAY_NOON });
+    const forced = await h.engine.run({ days: 2, lane: "au9999", force: true, now: FRIDAY_NOON });
     assert.equal(forced.cached, false);
     assert.equal(h.calls.length, 4);
     delete forced.report.generatedAt;
@@ -312,7 +326,7 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
     assert.deepEqual(forced.report, first.report);
 
     // Different params miss the cache and reuse the memo (still no fetches).
-    const wider = await h.engine.run({ days: 3, now: FRIDAY_NOON });
+    const wider = await h.engine.run({ days: 3, lane: "au9999", now: FRIDAY_NOON });
     assert.equal(wider.cached, false);
     assert.equal(wider.report.daysEvaluated, 3);
     assert.equal(h.calls.length, 6); // only the newly added day hits the source
@@ -324,7 +338,7 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
 test("engine: mid-window source failure yields a partial report with failures", async () => {
   const h = await createTempEngineHarness({ failingDay: "2026-08-14" });
   try {
-    const result = await h.engine.run({ days: 2, now: FRIDAY_NOON });
+    const result = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
     assert.equal(result.ok, true);
     assert.equal(result.report.daysEvaluated, 1);
     assert.equal(result.report.daysFailed, 1);
@@ -342,7 +356,7 @@ test("engine: abort stops the run between days and the engine can run again", as
   try {
     const controller = new AbortController();
     h.hang.enabled = true; // wedge the day-2 transports for THIS run only
-    const pending = h.engine.run({ days: 2, force: true, now: FRIDAY_NOON, signal: controller.signal });
+    const pending = h.engine.run({ days: 2, lane: "au9999", force: true, now: FRIDAY_NOON, signal: controller.signal });
     // First day completes, second day hangs on its fetch → abort mid-flight.
     await new Promise((resolve) => setTimeout(resolve, 50));
     controller.abort(new Error("client gone"));
@@ -352,7 +366,7 @@ test("engine: abort stops the run between days and the engine can run again", as
     // Drain stragglers created between abort and disarm (none expected).
     h.releaseHang();
     // Single-flight cleared: a fresh run succeeds and produces a full report.
-    const retry = await h.engine.run({ days: 2, force: true, now: FRIDAY_NOON });
+    const retry = await h.engine.run({ days: 2, lane: "au9999", force: true, now: FRIDAY_NOON });
     assert.equal(retry.ok, true);
     assert.equal(retry.report.daysEvaluated, 2);
     assert.equal(retry.report.daysFailed, 0);
@@ -367,9 +381,9 @@ test("engine: abort stops the run between days and the engine can run again", as
 test("engine: report persists to replay-stats.json and last() reads it back idempotently", async () => {
   const h = await createTempEngineHarness();
   try {
-    await h.engine.run({ days: 2, now: FRIDAY_NOON });
+    await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
     const saved = JSON.parse(await readFile(h.file, "utf8"));
-    assert.equal(saved.report.version, 1);
+    assert.equal(saved.report.version, 2);
     assert.equal(saved.report.params.days, 2);
 
     const fromMemory = await h.engine.last();
@@ -454,5 +468,90 @@ test("a blocked primary cannot lock out the mirror, and mirror health is tracked
     assert.equal(registry.isCircuitOpen("eastmoney-kline-au-delayed"), false);
   } finally {
     __setFetchImpl(previousFetch);
+  }
+});
+
+// ── 6. CMB signal lane: replay on the persisted accumulated-gold series ─────
+
+test("replayTradingDay lane=cmb evaluates on the CMB lane with a synthesized spread", () => {
+  const bars5 = buildBars(TWO_DAYS);
+  const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
+  const cmbDay = replayTradingDay("2026-08-14", bars5, bars60, {}, { lane: "cmb" });
+  const auDay = replayTradingDay("2026-08-14", bars5, bars60, {});
+  // Same machinery, same step count — only the signal lane differs.
+  assert.equal(cmbDay.steps, BARS_PER_DAY * 2);
+  assert.equal(cmbDay.steps, auDay.steps);
+  assert.ok(cmbDay.events.length > 0, "tracked actions still fire on the CMB lane");
+  for (const event of cmbDay.events) {
+    assert.equal(event.signalLane, "CMB");
+    assert.equal(event.instrument, "CMB");
+    assert.notEqual(event.action, undefined);
+  }
+  for (const event of auDay.events) {
+    assert.equal(event.signalLane, "AU9999");
+    assert.equal(event.instrument, "Au99.99");
+  }
+  // Deterministic per lane.
+  assert.deepEqual(replayTradingDay("2026-08-14", bars5, bars60, {}, { lane: "cmb" }), cmbDay);
+});
+
+test("engine: default lane is cmb — local persisted bars replay without any kline fetches", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-replaystats-cmb-"));
+  try {
+    const calls = [];
+    const local5 = buildBars(["2026-08-12", "2026-08-13", "2026-08-14"]);
+    const local60 = buildBars(["2026-08-12", "2026-08-13", "2026-08-14"], { strideMinutes: 60 });
+    const engine = createReplayStats({
+      getConfig: () => ({}),
+      fetchKlines: async (...args) => { calls.push(args.join("|")); return []; },
+      getCmbBars: () => ({ bars5: local5, bars60: local60 }),
+      logger: { warn: () => {} },
+    });
+    const result = await engine.run({ days: 3, now: FRIDAY_NOON });
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 0, "CMB lane never touches the kline source");
+    assert.equal(result.report.daysEvaluated, 3);
+    assert.equal(result.report.daysSkippedNoData, 0);
+    assert.equal(result.report.params.lane, "cmb");
+    assert.ok(result.report.caveats.includes("lane-cmb-persisted-bars"), "caveat names the cmb universe");
+    assert.ok(!result.report.caveats.includes("lane-au9999-only"));
+    // TTL cache still applies per lane.
+    const cached = await engine.run({ days: 3, now: FRIDAY_NOON });
+    assert.equal(cached.cached, true);
+    // Switching lanes misses the cache and falls back to the kline path.
+    const auResult = await engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
+    assert.equal(auResult.cached, false);
+    assert.equal(auResult.report.params.lane, "au9999");
+    assert.ok(auResult.report.caveats.includes("lane-au9999-only"));
+    assert.ok(calls.length > 0, "au9999 lane uses the fetch adapter");
+    // detail=true carries CMB-lane events.
+    const detail = await engine.run({ days: 3, force: true, detail: true, now: FRIDAY_NOON });
+    assert.ok((detail.events ?? []).length > 0);
+    for (const event of detail.events) assert.equal(event.signalLane, "CMB");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("engine: CMB days beyond the persisted history are reported as skipped", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-replaystats-depth-"));
+  try {
+    // Local history only covers the newest day; older requested days have no data.
+    const local5 = buildBars(["2026-08-14"]);
+    const local60 = buildBars(["2026-08-14"], { strideMinutes: 60 });
+    const engine = createReplayStats({
+      getConfig: () => ({}),
+      fetchKlines: async () => [],
+      getCmbBars: async () => ({ bars5: local5, bars60: local60 }),
+      logger: { warn: () => {} },
+    });
+    const result = await engine.run({ days: 3, now: FRIDAY_NOON });
+    assert.equal(result.report.daysRequested, 3);
+    assert.equal(result.report.daysEvaluated, 1);
+    assert.equal(result.report.daysSkippedNoData, 2);
+    assert.ok(result.report.totals.directionalEvents >= 0);
+    assert.deepEqual(result.report.failures, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
