@@ -14,20 +14,20 @@ A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right fl
 Install into the web profile from GitHub (requires `pnpm` on `PATH`; otherwise use the corepack fallback below):
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
 ```
 
 Or with an existing `dsh` binary:
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
 ```
 
 When `pnpm` is not on `PATH`:
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
 ```
 
 > `dsh plugin` forwards its arguments to pnpm and fetches the package from this repo (pnpm 9+, `git` required). The warning `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is not a profile bundle layer; it is activated by the loader row below.
@@ -66,12 +66,12 @@ The model catalog comes from currently registered Harness providers. Log queries
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.0"
-# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.0"
-# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
 ```
 
-Re-running the install command with the new `#v1.9.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
+Re-running the install command with the new `#v1.9.1` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
 
 ## Uninstall
 
