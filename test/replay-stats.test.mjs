@@ -21,6 +21,7 @@ import {
   aggregateReplayReport,
   computeForwardOutcome,
   createReplayStats,
+  executeReplayTrade,
   expandBarsToMinuteBars,
   listReplayTradingDays,
   replayTradingDay,
@@ -173,14 +174,52 @@ test("computeForwardOutcome reports post-exit drift for sell-family events", () 
   assert.equal(outcome.sessionEndNet, -3.4); // 100 − 98 − default costs 5.4
 });
 
+test("continuous replay starts from zero grams and accounts for fills plus final liquidation", () => {
+  const config = { limits: { maxGrams: 10 }, fee: { buyPerGram: 1, sellPerGram: 2 }, strategy: { slippagePerGram: 0 } };
+  const buy = executeReplayTrade(
+    { grams: 0, costBasisCny: 0, cashFlowCny: 0, realizedPnlCny: 0 },
+    { action: "buy_setup", suggestedOrder: { side: "buy", price: 100, grams: 10 } },
+    config,
+    { t: "2026-08-13T01:00:00.000Z", day: "2026-08-13" },
+  );
+  assert.equal(buy.portfolio.grams, 10);
+  assert.equal(buy.portfolio.costBasisCny, 1010);
+  assert.equal(buy.trade.cashFlowCny, -1010);
+  const sell = executeReplayTrade(
+    buy.portfolio,
+    { action: "sell_take_profit", suggestedOrder: { side: "sell", price: 110, grams: 4 } },
+    config,
+    { t: "2026-08-13T02:00:00.000Z", day: "2026-08-13" },
+  );
+  assert.equal(sell.portfolio.grams, 6);
+  assert.equal(sell.portfolio.costBasisCny, 606);
+  assert.equal(sell.trade.feeCny, 8);
+  assert.equal(sell.trade.realizedPnlCny, 28);
+
+  const report = aggregateReplayReport({
+    events: [],
+    continuous: { portfolio: sell.portfolio, trades: [buy.trade, sell.trade], lastMarkPrice: 108 },
+    steps: 0, blockedSteps: 0, daysRequested: 1, daysEvaluated: 1, daysFailed: 0, failures: [],
+    params: { days: 1, limits: { maxGrams: 10 }, fee: { buyPerGram: 1, sellPerGram: 2 }, strategy: { slippagePerGram: 0 } },
+    generatedAt: Date.parse("2026-08-14T04:00:00Z"),
+    window: { from: "2026-08-13", to: "2026-08-13" },
+  });
+  assert.equal(report.overall.startingGrams, 0);
+  assert.equal(report.overall.endingGrams, 6);
+  assert.equal(report.overall.endingLiquidationValueCny, 636);
+  assert.equal(report.overall.realizedNetCny, 28);
+  assert.equal(report.overall.unrealizedNetCny, 30);
+  assert.equal(report.overall.totalNetCny, 58);
+});
+
 test("aggregateReplayReport produces exact per-action counts, rates and buckets", () => {
-  const mkEvent = (action, score, outcome) => ({ action, signalLane: "AU9999", confidenceScore: score, outcome });
+  const mkEvent = (action, score, outcome, grams = 0) => ({ action, signalLane: "AU9999", confidenceScore: score, outcome, grams });
   const events = [
-    mkEvent("buy_setup", 5, { targetHit: true, stopHit: false, breakevenTouched: true, mfe30m: 2, mae30m: 1, mfe60m: 3, mae60m: 2, sessionEndNet: 1.5 }),
-    mkEvent("buy_setup", 7, { targetHit: false, stopHit: true, breakevenTouched: true, mfe30m: 0.5, mae30m: 2, mfe60m: 1, mae60m: 4, sessionEndNet: -3 }),
-    mkEvent("buy_setup", 7, { targetHit: false, stopHit: false, breakevenTouched: false, mfe30m: 1, mae30m: 1, mfe60m: 2, mae60m: 2, sessionEndNet: 0.5 }),
-    mkEvent("add_position", 6, { targetHit: true, stopHit: false, breakevenTouched: false, mfe30m: 4, mae30m: 1, mfe60m: 5, mae60m: 1, sessionEndNet: 2 }),
-    mkEvent("sell_weakness", 6, { targetHit: null, stopHit: null, breakevenTouched: null, postExitDrift60m: -1.5, sessionEndNet: 0.8 }),
+    mkEvent("buy_setup", 5, { targetHit: true, stopHit: false, breakevenTouched: true, mfe30m: 2, mae30m: 1, mfe60m: 3, mae60m: 2, sessionEndNet: 1.5 }, 100),
+    mkEvent("buy_setup", 7, { targetHit: false, stopHit: true, breakevenTouched: true, mfe30m: 0.5, mae30m: 2, mfe60m: 1, mae60m: 4, sessionEndNet: -3 }, 100),
+    mkEvent("buy_setup", 7, { targetHit: false, stopHit: false, breakevenTouched: false, mfe30m: 1, mae30m: 1, mfe60m: 2, mae60m: 2, sessionEndNet: 0.5 }, 100),
+    mkEvent("add_position", 6, { targetHit: true, stopHit: false, breakevenTouched: false, mfe30m: 4, mae30m: 1, mfe60m: 5, mae60m: 1, sessionEndNet: 2 }, 50),
+    mkEvent("sell_weakness", 6, { targetHit: null, stopHit: null, breakevenTouched: null, postExitDrift60m: -1.5, sessionEndNet: 0.8 }, 100),
   ];
   const report = aggregateReplayReport({
     events,
@@ -212,8 +251,42 @@ test("aggregateReplayReport produces exact per-action counts, rates and buckets"
   const bucket7 = report.confidenceBuckets.find((bucket) => bucket.bucket === "≥7");
   assert.equal(bucket7.events, 2);
   assert.equal(bucket7.targetHitRate, 0);
-  assert.equal(report.caveats.length, 6);
+  assert.equal(report.caveats.length, 7);
   assert.deepEqual(report.failures, []);
+
+  // Independent signal samples remain available for diagnostics only; they no
+  // longer feed the continuous account P&L displayed at the top of the UI.
+  const signalQuality = report.signalQuality;
+  assert.equal(signalQuality.eventsWithOutcome, 5);
+  assert.equal(signalQuality.entryEvents, 4);
+  assert.equal(signalQuality.exitEvents, 1);
+  assert.equal(signalQuality.winRate, 0.8);
+  assert.equal(signalQuality.avgNetPerGram, Math.round(((1.5 - 3 + 0.5 + 2 + 0.8) / 5) * 100) / 100);
+  assert.equal(signalQuality.totalNetCny, 80);
+  assert.equal(signalQuality.avgNetCnyPerEvent, 16);
+  assert.equal(report.overall.startingGrams, 0);
+  assert.equal(report.overall.totalNetCny, 0);
+});
+
+test("aggregateReplayReport: empty event list yields a zero-valued continuous account", () => {
+  const report = aggregateReplayReport({
+    events: [],
+    steps: 0,
+    blockedSteps: 0,
+    daysRequested: 1,
+    daysEvaluated: 0,
+    daysFailed: 0,
+    failures: [],
+    params: { days: 1 },
+    generatedAt: Date.parse("2026-08-14T04:00:00Z"),
+    window: { from: "2026-08-14", to: "2026-08-14" },
+  });
+  assert.equal(report.overall.eventsWithOutcome, 0);
+  assert.equal(report.overall.startingGrams, 0);
+  assert.equal(report.overall.endingGrams, 0);
+  assert.equal(report.overall.totalNetCny, 0);
+  assert.equal(report.overall.avgNetPerGram, null);
+  assert.equal(report.overall.winRate, null);
 });
 
 test("replayTradingDay is deterministic: identical fixtures produce identical reports", () => {
@@ -243,6 +316,9 @@ test("replayTradingDay is deterministic: identical fixtures produce identical re
     assert.equal(typeof event.outcome.entry, "number");
     assert.equal(event.outcome.costPerGram, 5.4); // 0 + 5 fee + 0.2 spread + 0.2 slip (defaults)
     assert.ok(event.day === "2026-08-14");
+    // v3: nominal size is captured per event so overall CNY sums are possible.
+    assert.equal(typeof event.grams, "number");
+    assert.ok(event.grams >= 0);
   }
 });
 
@@ -271,8 +347,9 @@ async function createTempEngineHarness({ failingDay = null } = {}) {
   const hang = { enabled: false };
   const all5 = buildBars(["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"]);
   const all60 = buildBars(["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"], { strideMinutes: 60 });
+  const liveConfig = {}; // mutable on purpose — cache-fingerprint tests mutate it
   const engine = createReplayStats({
-    getConfig: () => ({}),
+    getConfig: () => liveConfig,
     fetchKlines: async (secid, klt, limit, endDay) => {
       calls.push(`${secid}|${klt}|${endDay}`);
       const day = `${endDay.slice(0, 4)}-${endDay.slice(4, 6)}-${endDay.slice(6, 8)}`;
@@ -289,7 +366,7 @@ async function createTempEngineHarness({ failingDay = null } = {}) {
     logger: { warn: () => {} },
   });
   return {
-    dir, file, engine, calls, hang,
+    dir, file, engine, calls, hang, liveConfig,
     get pendingHangs() { return pendingHangs.length; },
     releaseHang: () => { while (pendingHangs.length) pendingHangs.shift()(); },
     cleanup: () => rm(dir, { recursive: true, force: true }),
@@ -309,6 +386,10 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
     assert.equal(first.report.daysEvaluated, 2);
     assert.equal(first.report.daysRequested, 2);
     assert.equal(first.report.window.from, "2026-08-13");
+    // v4 wire: continuous zero-position account + strategy snapshot.
+    assert.equal(first.report.version, 4);
+    assert.ok(first.report.overall && typeof first.report.overall === "object");
+    assert.ok(first.report.params.strategy && Number.isFinite(first.report.params.strategy.confirmBars));
 
     // Same params inside the TTL → cached envelope, zero extra requests.
     const cached = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
@@ -330,6 +411,32 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
     assert.equal(wider.cached, false);
     assert.equal(wider.report.daysEvaluated, 3);
     assert.equal(h.calls.length, 6); // only the newly added day hits the source
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("engine: changing a strategy parameter invalidates the cached report", async () => {
+  const h = await createTempEngineHarness();
+  try {
+    const first = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
+    assert.equal(first.cached, false);
+    // Same window + unchanged config → cached.
+    const again = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
+    assert.equal(again.cached, true);
+    assert.equal(h.calls.length, 4);
+
+    // Mutate one strategy knob (e.g. the user toggles closeBySessionEnd):
+    // the same-(window,lane) report must NOT be served from cache anymore.
+    h.liveConfig.strategy = { confirmBars: 7 };
+    const reconfigured = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
+    assert.equal(reconfigured.cached, false);
+    assert.equal(reconfigured.report.params.strategy.confirmBars, 7);
+    assert.equal(h.calls.length, 4); // day-fetch memo still avoids refetches
+
+    // And the new fingerprint caches on its own.
+    const settled = await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
+    assert.equal(settled.cached, true);
   } finally {
     await h.cleanup();
   }
@@ -383,8 +490,9 @@ test("engine: report persists to replay-stats.json and last() reads it back idem
   try {
     await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_NOON });
     const saved = JSON.parse(await readFile(h.file, "utf8"));
-    assert.equal(saved.report.version, 2);
+    assert.equal(saved.report.version, 4);
     assert.equal(saved.report.params.days, 2);
+    assert.ok(Array.isArray(saved.trades), "continuous trade details persist with the report");
 
     const fromMemory = await h.engine.last();
     const fromDisk = await (() => {
@@ -398,6 +506,16 @@ test("engine: report persists to replay-stats.json and last() reads it back idem
       return cold.last();
     })();
     assert.deepEqual(fromDisk.report, fromMemory.report);
+    const detailFromDisk = await (() => {
+      const cold = createReplayStats({
+        getConfig: () => ({}),
+        fetchKlines: async () => [],
+        file: h.file,
+        writeQueue: makeWriteQueue(),
+      });
+      return cold.last(true);
+    })();
+    assert.deepEqual(detailFromDisk.trades, saved.trades, "persisted reports retain continuous trade details");
     // Repeated reads are idempotent.
     const again = await (() => {
       const cold = createReplayStats({

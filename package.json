@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-goldboard",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "description": "Gold price dashboard and intraday decision support for the DeepSeek Harness web GUI: SGE Au99.99 + XAU spot quotes, a draggable top-right floating board, CMB 积存金 live/international-converted fallback prices, fee-aware buy/sell suggestions, and host system/webhook alerts.",
   "type": "module",
   "main": "lib/index.js",

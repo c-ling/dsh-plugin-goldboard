@@ -1,8 +1,8 @@
 # dsh-plugin-goldboard
 
-DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起为小圆球），显示上金所 Au99.99、伦敦现货金 XAU 与 USDCNY，优先通过招商银行公开接口拉取积存金客户买卖价（接口不可用时回退为国际金价按汇率折算 + 固定价差估算）；结合持仓/上限与手续费（默认买入 0 + 卖出 5 元/克）给出日内买卖参考与建议委托单，并通过宿主机系统通知和 Webhook 在阈值穿越时提醒。
-
 [English](README-en.md)
+
+DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起为小圆球），显示上金所 Au99.99、伦敦现货金 XAU 与 USDCNY，优先通过招商银行公开接口拉取积存金客户买卖价（接口不可用时回退为国际金价按汇率折算 + 固定价差估算）；结合持仓/上限与手续费（默认买入 0 + 卖出 5 元/克）给出日内买卖参考与建议委托单，并通过宿主机系统通知和 Webhook 在阈值穿越时提醒。
 
 [![dsh-plugin topic](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -14,20 +14,20 @@ DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起
 从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
 或使用已有的 `dsh` 命令：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
 pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
 > `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
@@ -69,12 +69,12 @@ curl -s 'http://127.0.0.1:3080/dsh-plugin-goldboard/analysis-logs?limit=30'
 ## 更新
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
-用新的 `#v1.9.1` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
+用新的 `#v1.10.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
 ## 卸载
@@ -105,7 +105,7 @@ corepack pnpm remove dsh-plugin-goldboard
 - 技术口径审计：报价带 `instrument`、`market`、`currency`、`unit` 和来源质量元数据；XAU/USD 现货与 Yahoo `GC=F` 黄金期货分开，轮询和汇率推导 K 线明确标记 `synthetic`；正式指标只使用已收盘 K 线，并输出 `calculationVersion`、`warmupReady` 与固定的 Wilder 平滑方法。提供固定行情回放接口：`POST /dsh-plugin-goldboard/replay`。
 - 模型分析（手动触发）：从 Harness 当前可用的 provider/model 目录选择模型和 reasoning effort，不改变当前会话模型；模型只解释宿主指标和规则 plan，不能补造价格或生成买卖指令。即使数据质量门控未通过也可手动调用，模型需以数据不足/过期/无效等状态说明限制。设置页的「模型与分析」区域提供目录选择、「立即分析」和独立「查询日志」面板。
 - 分析查询日志：每次真实模型调用生成 `queryId`，记录 started/finished 生命周期、模型、行情快照、质量状态、输入 hash、结构化结果、usage 和错误；日志写入 `$DSH_HOME/storages/dsh-plugin-goldboard/analysis-log.jsonl`，支持脱敏详情、筛选、游标分页和孤儿 running 查询恢复。
-- 策略统计（v1.8.0 引入，v1.9.0 默认积存金道，只读分析）：对最近 10/20/30 个交易日按当前策略参数做批量回放。默认 `lane=cmb`：以**招行积存金信号道**、本机持久化的积存金分钟序列逐日点时切片回放（零网络、不泄露未来数据），指标与规则逐 5 分钟重建（confirmBars/冷却照常生效），口径与实盘一致；可选 `lane=au9999` 走东财 Au99.99 K 线宇宙。统计各动作（买入准备与止盈止损减仓家族）触发次数、目标命中率、止损触发率、MFE/MAE 与持有至时段末净益，并给出置信分×命中率分箱；报告附口径局限说明（积存金道卖出价按 5 元/克固定价差合成、深度受本地数据限制并以 daysSkippedNoData 如实跳过等）。同 (窗口,车道) 缓存 1 小时，中途失败输出部分报告；结果落盘 `storages/dsh-plugin-goldboard/replay-stats.json`。设置页「策略统计」卡片一键生成，双语报表。
+- 策略统计（v1.10.0，默认积存金道，只读分析）：对最近 10/20/30 个交易日按当前策略参数做批量回放。默认 `lane=cmb`：以**招行积存金信号道**、本机持久化的积存金分钟序列逐日点时切片回放（零网络、不泄露未来数据），指标与规则逐 5 分钟重建（confirmBars/冷却照常生效）；可选 `lane=au9999` 走东财 Au99.99 K 线。顶部连续账户固定从 **0 克** 开始，按时间顺序执行策略建议，使用当前最大克数、手续费和滑点，期末未卖出仓位按最后可卖价扣除退出成本估值；逐笔成交明细列出成交价、克数、费用、成交前后持仓、现金流和已实现收益，并和报告一同落盘到 `storages/dsh-plugin-goldboard/replay-stats.json`。下方动作表仍提供目标命中率、止损触发率、MFE/MAE 和时段末表现等**独立信号质量**指标，不能相加为连续账户收益。报告会附口径局限说明，同一 (窗口,车道,参数) 缓存 1 小时，中途失败仍输出部分报告。
 
 ## 数据源
 

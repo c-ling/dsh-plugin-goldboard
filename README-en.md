@@ -1,8 +1,8 @@
 # dsh-plugin-goldboard
 
-A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right floating board (collapsible to a small orb) showing SGE Au99.99, London spot gold XAU and USDCNY, with China Merchants Bank 积存金 prices fetched from the CMB market-center API when available (falling back to the international gold price converted at the exchange rate plus a configurable spread). It uses your position/limits and fee model (default buy 0 + sell 5 CNY/g) to produce intraday buy/sell references and a copyable suggested order, and alerts on every threshold crossing via host system notifications and webhooks.
-
 [中文](README.md)
+
+A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right floating board (collapsible to a small orb) showing SGE Au99.99, London spot gold XAU and USDCNY, with China Merchants Bank 积存金 prices fetched from the CMB market-center API when available (falling back to the international gold price converted at the exchange rate plus a configurable spread). It uses your position/limits and fee model (default buy 0 + sell 5 CNY/g) to produce intraday buy/sell references and a copyable suggested order, and alerts on every threshold crossing via host system notifications and webhooks.
 
 [![dsh-plugin topic](https://img.shields.io/badge/topic-dsh--plugin-blue)](https://github.com/topics/dsh-plugin)
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -14,20 +14,20 @@ A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right fl
 Install into the web profile from GitHub (requires `pnpm` on `PATH`; otherwise use the corepack fallback below):
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
 Or with an existing `dsh` binary:
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
 When `pnpm` is not on `PATH`:
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
 > `dsh plugin` forwards its arguments to pnpm and fetches the package from this repo (pnpm 9+, `git` required). The warning `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is not a profile bundle layer; it is activated by the loader row below.
@@ -66,12 +66,12 @@ The model catalog comes from currently registered Harness providers. Log queries
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
-# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
-# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.9.1"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
+# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
+# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.10.0"
 ```
 
-Re-running the install command with the new `#v1.9.1` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
+Re-running the install command with the new `#v1.10.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
 
 ## Uninstall
 
@@ -101,7 +101,7 @@ This plugin keeps state under `$DSH_HOME/storages/dsh-plugin-goldboard/`, which 
 - Auditable market semantics: quotes expose `instrument`, `market`, `currency`, `unit` and source-quality metadata; XAU/USD spot and Yahoo `GC=F` futures stay in separate lanes. Polling and FX-derived bars are explicitly marked `synthetic`; formal indicators use closed bars only and expose `calculationVersion`, `warmupReady` and fixed Wilder smoothing methods. Fixed-fixture replay is available at `POST /dsh-plugin-goldboard/replay`.
 - Manual model analysis: choose a provider, model and reasoning effort from the current Harness catalog without changing the active conversation model. The model explains host-computed indicators and the rule plan only; it cannot invent prices or issue trading instructions. When data-quality gates fail, manual analysis can still be invoked and the model must report the data limitations. Settings → Gold Board adds model selection, Analyze now and a separate Query logs panel.
 - Query audit logs: every real model call gets a `queryId` and started/finished lifecycle record with model, market snapshot, quality state, input hash, structured result, usage and errors. Logs are stored at `$DSH_HOME/storages/dsh-plugin-goldboard/analysis-log.jsonl`, with redacted details, filters, cursor pagination and orphaned-running recovery.
-- Strategy statistics (introduced v1.8.0, CMB lane the default since v1.9.0, read-only analysis): batch-replays the last 10/20/30 trading days under the current strategy parameters. The default `lane=cmb` replays this host's persisted accumulated-gold minute series on the CMB signal lane with per-day point-in-time slicing (no network, no lookahead), rebuilding indicators and rules bar-by-bar (confirmBars/cooldown stay active) so terms match the live desk exactly; `lane=au9999` keeps the Eastmoney Au99.99 kline universe. The report shows how often each action fired (buy setup and the take-profit/trailing/stop/weakness family) together with target hit rate, stop-hit rate, MFE/MAE, net P&L held to session end, plus a confidence-score × hit-rate breakdown. Methodology caveats ship in-report (CMB sell price synthesized at a fixed 5 CNY/g spread, depth bounded by local data with daysSkippedNoData honesty, …). Same-(window,lane) results cache for one hour; failures yield a partial report; results persist to `storages/dsh-plugin-goldboard/replay-stats.json`. One-click generation from the bilingual “Strategy statistics” settings card.
+- Strategy statistics (v1.10.0, CMB lane by default, read-only analysis): batch-replays the last 10/20/30 trading days under the current strategy parameters. The default `lane=cmb` replays this host's persisted accumulated-gold minute series on the CMB signal lane with per-day point-in-time slicing (no network, no lookahead), rebuilding indicators and rules bar-by-bar with confirmBars/cooldown active; `lane=au9999` keeps the Eastmoney Au99.99 kline universe. The top continuous account always starts from **0 g**, fills strategy suggestions in time order under the current maximum grams, fees, and slippage, and values an unsold ending position at the final sell price after exit costs. Persisted trade details show price, grams, fees, positions before and after each fill, cash flow, and realized P&L in `storages/dsh-plugin-goldboard/replay-stats.json`. The action tables below retain independent signal-quality metrics such as target/stop hit rate, MFE/MAE, and session-end performance; they must not be added to the continuous account total. Methodology caveats ship in-report, same-(window,lane,parameters) results cache for one hour, and failures yield a partial report.
 
 ## Data sources
 

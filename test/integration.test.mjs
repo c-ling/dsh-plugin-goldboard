@@ -668,7 +668,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(started.body.ok, true);
   assert.equal(started.body.cached, false);
   const report = started.body.report;
-  assert.equal(report.version, 2);
+  assert.equal(report.version, 4); // v4 wire: continuous zero-position account + params snapshot
   assert.equal(report.params.days, 2);
   assert.equal(report.params.lane, "au9999");
   assert.equal(report.daysRequested, 2);
@@ -690,10 +690,12 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(fetched.status, 200);
   assert.equal(fetched.body.ok, true);
   assert.deepEqual(fetched.body.report, report);
+  assert.ok(Array.isArray(fetched.body.trades), "detail response includes continuous trades");
 
   // Report persisted next to state.json.
   const persisted = JSON.parse(await readFile(join(h.dir, "replay-stats.json"), "utf8"));
-  assert.equal(persisted.report.version, 2);
+  assert.equal(persisted.report.version, 4);
+  assert.ok(Array.isArray(persisted.trades), "continuous trade details persist");
 });
 
 test("integration: mid-window source failure surfaces as a partial report on the route", async (t) => {

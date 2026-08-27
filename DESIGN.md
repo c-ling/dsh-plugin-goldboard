@@ -413,7 +413,17 @@
   目标价触达率、止损触发率、回本触及率（首次触碰优先）、MFE/MAE（+30m/+60m）、持有至时段结束的
   净盈亏（扣买入+卖出手续费 + 估算价差 + 滑点）；卖出家族对称地报告「离场后 60 分钟漂移」（负值 =
   离场优于继续持有）与时段末净节省。聚合层另报 `coverageBlockedRatio`（data_incomplete 步占比）与
-  置信分（≤4 / 5 / 6 / ≥7）×目标命中率分箱。
+  置信分（≤4 / 5 / 6 / ≥7）×目标命中率分箱。每个事件同时捕获名义手数 `grams`（flat 通道预算 /
+  hold 通道仓位）。
+- **总体表现合并口径（v1.10.0，report v3）**：`report.overall` 把窗口内全部方向性事件合并成一个
+  收益视图——`eventsWithOutcome / entryEvents / exitEvents`、`winRate`（时段末结果为正的事件占比：
+  入场盈利或卖出优于持有）、`avgNetPerGram`（元/克）、`totalNetCny = Σ(sessionEndNet × grams)` 与
+  `avgNetCnyPerEvent`。**披露语义**：每个事件是独立模拟，`totalNetCny` 是「规则质量加总」而非连续
+  持仓的资金曲线（事件之间不串仓、不共享预算）；UI 在卡片旁如实说明。
+- **参数快照与配置感知缓存（v1.10.0）**：`report.params` 附带 `strategy` / `fee` / `limits.maxGrams`
+  快照（UI 展示本报告按哪些参数算的，如收盘前平仓开/关）；缓存键由 `(days, lane)` 扩展为
+  `(days, lane, strategy+fee+fingerprint)`——修改任意策略参数后重新生成会立即重算，不再出现
+  「改了参数一小时内仍看到旧报告」的情况。持仓不在指纹内（两条模拟通道各自合成仓位）。
 - **分钟覆盖率推导**：1m 合成 bar 仅保留约一天，统计窗口的分钟覆盖率由真实 5m K 线拆分为分钟槽推导
   （含「正在形成的分钟」标记槽，语义对齐实盘轮询），5 分钟内的微观缺口不可见。
 
@@ -429,7 +439,7 @@
 | `two-simulated-passes` | 双模拟通道口径（空仓 + 当日开盘价持仓） |
 | `past-performance-advisory` | 历史命中率不代表未来表现，仅供调参参考 |
 
-**工程约束**：单飞行去重（并发 POST 加入同一计算）；同 (窗口, 车道) 参数结果缓存 1 小时；
+**工程约束**：单飞行去重（并发 POST 加入同一计算）；同 (窗口, 车道, 参数指纹) 结果缓存 1 小时；
 客户端断开（res close 且响应未完成 → AbortController）在交易日边界取消且不再推进；逐日 await 让出事件循环，
 tick 循环不受影响；中途源失败产出已完成天数的部分报告 + failures 列表；报告落盘
 `storages/dsh-plugin-goldboard/replay-stats.json`（只含聚合层；明细仅在 `detail=true` 时截断至最近 200 条返回，不落盘）。
@@ -591,16 +601,31 @@ tick 循环不受影响；中途源失败产出已完成天数的部分报告 + 
   "ok": true,
   "cached": false,
   "report": {
-    "version": 2,
+    "version": 3,
     "generatedAt": "2026-08-14T04:00:00.000Z",
     "calculationVersion": "goldboard-indicators-v2",
-    "params": { "days": 10, "lane": "cmb" },
+    "params": {
+      "days": 10,
+      "lane": "cmb",
+      "fee": { "buyPerGram": 0, "sellPerGram": 5 },
+      "limits": { "maxGrams": 0 },
+      "strategy": { "confirmBars": 2, "scoreThreshold": 5, "closeBySessionEnd": false, "...": "…全部归一化策略参数" }
+    },
     "window": { "from": "2026-08-03", "to": "2026-08-14" },
     "daysRequested": 10,
     "daysEvaluated": 8,
     "daysSkippedNoData": 1,
     "daysFailed": 1,
     "totals": { "steps": 4080, "directionalEvents": 37, "blockedSteps": 512, "coverageBlockedRatio": 0.1255 },
+    "overall": {
+      "eventsWithOutcome": 37,
+      "entryEvents": 15,
+      "exitEvents": 22,
+      "winRate": 0.4865,
+      "avgNetPerGram": -0.31,
+      "totalNetCny": -1146.5,
+      "avgNetCnyPerEvent": -30.99
+    },
     "perAction": [
       {
         "action": "buy_setup",
@@ -662,11 +687,15 @@ tick 循环不受影响；中途源失败产出已完成天数的部分报告 + 
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
-- **策略统计卡片（v1.8.0，plan-06）**：「模型与分析」区旁提供天数选择（10/20/30）、
-  「生成统计」按钮、进度文案、动作 × 命中率/MFE/MAE/时段末净益结果表、置信分分箱与
-  caveats 展示；进入设置页时 GET 回显最近一次落盘报告；全部文案走 `t()` 双语词典，
-  表格样式只用 `--dsw-alias-*` token（表头 `bg-layer-2`、行分隔 `border-l1`、净益
-  正 `state-success-primary` / 负 `state-error-primary`）。
+- **策略统计卡片（v1.8.0 plan-06；v1.10.0 重构展示）**：「模型与分析」区旁提供天数选择（10/20/30）、
+  「生成统计」按钮、进度文案。结果分两层：顶部「总体表现」合并卡（合计模拟净收益（元）／综合胜率／
+  平均每事件净益（元/克）／事件构成，附「独立事件加总、非资金曲线」的口径说明）；其下为参数快照行
+  （confirmBars·评分阈值·冷却·收盘前平仓开/关，取自 `report.params`）；明细表按「做多入场信号」与
+  「卖出与减仓信号」分两组，列名带单位（元/克），每个表头 hover 提示解释该列语义——入场组的
+  时段末净益是「买入并持到收盘」，卖出组则是「离场优于持有」。置信分分箱与 caveats 保持不变；
+  进入设置页时 GET 回显最近一次落盘报告（旧 v2 报告无 overall/参数快照时按 per-action 降级展示并
+  隐藏不可得卡片）。全部文案走 `t()` 双语词典，表格样式只用 `--dsw-alias-*` token（表头
+  `bg-layer-2`、行分隔 `border-l1`、净益正 `state-success-primary` / 负 `state-error-primary`）。
 - **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
   `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
   - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像
