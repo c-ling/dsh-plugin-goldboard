@@ -1,6 +1,6 @@
-# dsh-plugin-goldboard — 设计文档（v1.2 实现基线）
+# dsh-plugin-goldboard — 设计文档（v1.11.0 当前实现）
 
-> 状态：P0 数据口径、P1 质量/回放和 P2 Harness 多模型分析已实现；本文保留原始产品约束，并记录当前实现接口。
+> 状态：本文描述当前代码口径。v1.11.0 完成统一执行账本、独立持仓估值、双边历史增量采集与 replay report v5；长期样本外验证、风险预算和真实成交回填仍未实现。
 > 目标环境：DeepSeek Harness Web GUI，本地 `link:` 安装到 `web` profile。
 > 插件形态：双面 Cordis 包（Node 宿主半 + 手写 factory-CJS 浏览器半），无构建步骤。
 
@@ -12,8 +12,8 @@
 | --- | --- |
 | 信号金价标的 | **信号口径优先级：招行积存金实时价 → 国际金价 XAU 按汇率折算 → 上金所 Au99.99**；实际交易标的为**招商银行积存金**：招行实时价不可用时按国际金价按汇率折算 + 固定价差自动估算（默认 +1.72 元/克，买卖价差可分别设置），国际价也不可用时回退 Au99.99 + 价差估算 |
 | 实际交易标的 | **招商银行积存金**；插件用 Au99.99（或国际金价折算）做信号，招行价优先通过招行市场中心接口拉取实时客户买卖价，接口不可用时按国际金价按汇率折算 + 固定价差自动估算（默认 +1.72 元/克，买卖价差可分别设置） |
-| 手续费模型 | **双边合计 5 元/克，买入 0 + 卖出 5** |
-| 持仓周期 | **信号以 5/15/60 分钟线为主**；v1.9.0 起不固定倾向于日内了结——收盘前强制平仓提示默认关闭，是否在当天了结由用户按常规信号自行决定（可开启 `strategy.closeBySessionEnd` 恢复） |
+| 成本模型 | 配置默认买入 0 + 卖出 5 元/克；v1.11.0 起该字段明确表示报价外显式费用，真实 bid/ask 内点差与 synthetic fallback 估算点差分开列账，用户需按实际产品协议核对 |
+| 持仓周期 | **信号使用 5/10/30/60 分钟数据**；v1.9.0 起不固定倾向于日内了结——收盘前强制平仓提示默认关闭，是否在当天了结由用户按常规信号自行决定（可开启 `strategy.closeBySessionEnd` 恢复） |
 | 持仓来源 | **v1 手动录入**，不接账户 |
 | 交易时段 | 按招行积存金：**工作日 09:00–次日 02:00**，周末和法定节假日休市 |
 | 提醒渠道 | **宿主机系统通知 + Webhook**（飞书/钉钉/企业微信/通用 JSON） |
@@ -36,8 +36,8 @@
   - 不弹窗、不抢焦点；提醒由系统通知/Webhook 负责，不在页面内制造弹层。
 - 设置页（`settings.section`）：
   - 持仓：当前克数、平均成本（元/克）。
-  - 上限：最大投入克数 / 最大投入金额，二选一约束。
-  - 手续费：双边合计默认 5 元/克，买入 0 + 卖出 5（可调，设置页显示总成本与回本线预览）。
+  - 上限：最大投入克数。
+  - 成本：报价外显式买入/卖出费、synthetic fallback 估算点差与滑点分别配置和列账；默认显式费用为买入 0 + 卖出 5 元/克。
   - 招行积存金备用价差：买入价差、卖出价差默认各 +1.72 元/克，可分别调整；仅当招行接口不可用时用于估算。
   - 信号阈值、交易时段（工作日 09:00–次日 02:00，节假日表可编辑）。
   - 系统通知开关、Webhook 渠道配置（密钥只写、读回脱敏）。
@@ -75,7 +75,7 @@
 | 路由前缀 | `/dsh-plugin-goldboard/*` |
 | profile loader | `- insert: { id: dsh-plugin-goldboard, name: 'dsh-plugin-goldboard' }` |
 | 宿主依赖 | `inject: ["webServer", "llm"]` |
-| 浏览器依赖 | `inject: ["slots", "locale"]` |
+| 浏览器 runtime 依赖 | client exports `inject: ["slots", "locale", "connection", "remote", "settingsScope"]`；`package.json#dsh.client.inject: []` 是“其他 client bundle”图边，不是 runtime service 列表，保持为空 |
 
 ---
 
@@ -244,8 +244,7 @@
 - 休市期间：报价看板继续显示最后价，但**抑制所有买入/卖出提醒**；数据过期 > 15 分钟（`STALE_QUOTE_MS`）触发一次 `data_stale` 提醒。
 - 招行积存金价格：
   - 优先：`https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center` 返回 `zBuyPrc`（客户买入价）/ `zSelPrc`（客户卖出价）；折线图使用客户买入价绘制，`average = (zBuyPrc + zSelPrc) / 2` 仅作兼容保留。
-  - 回退：`cmbBuy ≈ 基准价 + spreadOffset`、`cmbSell ≈ 基准价 + spreadOffset`（基准价为国际金价按汇率折算，缺失时回退 Au99.99）。`spreadOffset` 来源分两级（v1.5.0 动态校准，详见 §7.2）：
-    `dynamic-estimate`（6h 内实时中间价差采样 ≥30 条取中位数，夹在 `[0, 静态价差 × 3]`）→ `static`（静态配置值，冷启动兜底不变）。snapshot `derived.cmb.spreadSource ∈ {live, dynamic-estimate, static}` 与 `spreadSampleCount` 标注当前来源；设置页招行卡片同步展示。
+  - 回退：`ask ≈ reference + buyOffset`、`bid ≈ reference + sellOffset`，并用 `estimatedSpreadPerGram` 保证 synthetic 双边最小距离。offset 来源为 `dynamic-bid-ask`（6h 内至少 30 个双边样本）→ `dynamic-legacy`（仅旧 spreadMid 样本）→ `static`；snapshot 同时披露 sample count、synthetic、quality 和 executionVersion。
   - 看板标注“招行价以 App 为准”。
   - 招行“昨收/涨跌幅”优先取当天 00:00 的自身 1 分钟价格；若 00:00 无数据，则降级为国际金价昨收折算人民币 + 当前招行价差估算。
 
@@ -264,23 +263,23 @@
 
 计算顺序固定：先补足 bars → 数据覆盖率门槛 → 计算指标 → 快照输出。任何指标因数据不足不输出信号，只显示 `数据积累中`。
 
-### 7.2 手续费与回本线
+### 7.2 ExecutionModel、成本与估值
 
-- 配置默认：`fee.buyPerGram = 0`，`fee.sellPerGram = 5`（双边合计 5，可调，设置页显示总额与回本线预览）。
-- 招行价差：`cmb.buySpreadPerGram = 1.72`、`cmb.sellSpreadPerGram = 1.72`（可调，可负）。
-- **动态价差校准（v1.5.0）**：招行实时报价有效期间，按 ≥60s 间隔采样
-  `{ t, spreadMid = (zBuyPrc + zSelPrc)/2 − xauCnyPerGram }` 入 `state.cmbSpreadSamples`
-  （容量 512、单条 TTL 6h）。兜底估算时：有效样本 ≥30 → `spreadOffset = median(窗口内样本)`
-  夹在 `[0, 静态价差 × 3]`，买卖两侧共用该中间价口径的偏移；样本不足 → 沿用静态配置值。
-  来源与样本数通过 snapshot `derived.cmb.spreadSource/spreadSampleCount` 透出。
-- 新开仓回本价（按招行估算价口径）：
-  `breakevenCmb = cmbBuyPrice + buyFee + sellFee + estimatedSpread + slippage`
-  其中 `estimatedSpread` 用近期买卖价差中位数（Au99.99 盘口，缺失时默认 0.2 元/克），`slippage` 默认 0.2 元/克（可配置）。
-- 已持仓回本价：
-  `exitNeededCmb = 平均成本 + sellFee + estimatedSpread + slippage`
-  （买入手续费为 0 且已沉没，不再重复计入；设置页两个口径都展示）。
-- 所有“建议卖出价”必须 ≥ 回本价；否则显示“当前波动不足以覆盖成本”，不输出买入信号。
-- 信号价优先级：**招行实时 → 国际金价按汇率折算 → Au99.99**（国际价也不可用时回退 Au99.99 + 价差估算招行价）。展示与委托建议同时给出 `signalPrice` 和 `cmbEstimatedPrice` 两个数字。
+`lib/execution.js` 是 live plan、snapshot 与 replay 共用的内部 module：
+
+```text
+buyCost = executableAsk + explicitBuyFee + buySlippage
+sellProceeds = executableBid - explicitSellFee - sellSlippage
+pnl = sellProceeds - buyCost
+```
+
+- 真实 CMB 客户双边报价直接成为 ask/bid；`estimatedSpreadPerGram` 不再叠加到真实双边价。
+- 缺少双边价时，reference + `cmb.buy/sellSpreadPerGram` 生成 synthetic ask/bid；估算点差只在该路径建立最小双边距离，并在 `components` 中披露。
+- 配置的 `fee.buy/sellPerGram` 明确定义为报价外显式费用，`slippagePerGram` 按买卖各自记账。默认仍为买入 0、卖出 5、滑点 0.2；该业务语义必须由用户按产品协议核对。
+- 持仓估值只依赖持仓和新鲜 executable bid，不依赖技术指标门控。不可估值时返回 `feeAdjustedPnl:null + valuationReasonCode`，绝不补 0。
+- 止损直接比较 `effectivePnlPerGram <= -maxLossPerGram`；展示阈值由同一 module 推导，避免手续费符号反转。
+- 动态 fallback 校准按分钟分别持久化 `buyOffset = customerBuy-reference` 与 `sellOffset = customerSell-reference`；30 个新鲜样本后分别取中位数。v1.10 的 `spreadMid` 样本继续可读，但 `spreadSource=dynamic-legacy`。
+- 新采集 CMB bar 保存 ask/bid OHLC；旧单边 bar 继续保留原始身份，replay 只能标记为 proxy，不能视为真实双边历史。
 
 ### 7.3 信号规则（默认参数全部可在设置页调整）
 
@@ -311,7 +310,7 @@
 1. `marketState` 为 `open`（招行积存金工作时段 09:00–次日 02:00 内）；
 2. 数据完整性门槛通过（见上）；
 3. **10/30/60 分钟 EMA20 全部向上**（多周期趋势共识：60 分钟线来自东财 K 线/自建，10/30 分钟线由 5 分钟线重采样得到，冷启动即有历史预热）；
-4. 5 分钟 RSI14 从 < 35 回升并上穿 35，或 5 分钟收盘重新站上 SMA20（入场时机仍看 5 分钟）；
+4. 5 分钟 RSI14 当前位于 `(rsiOversold, 50)`，或当前技术价高于 5 分钟 SMA20；这是状态条件，不声称发生了上穿；
 5. 价格距离近 20 根 bar 低点或布林下轨不超过 0.5%。
 
 输出：
@@ -319,8 +318,8 @@
 - `action = buy_setup`
 - 建议买入价（信号价口径）= `min(现价+0.1, 近20低点 + 0.3×ATR)`
 - 建议招行买入价 = 建议买入价 + `cmb.buySpreadPerGram`
-- 建议克数 = `min(最大克数-当前克数, floor(剩余最大金额 / 建议招行买入价))`
-- 目标卖出价（招行口径）= `max(breakevenCmb + 最小利润, 近20高点 - 0.3×ATR + cmb.sellSpreadPerGram, 布林上轨 + cmb.sellSpreadPerGram)`
+- 建议克数按最大克数的轻仓 20% / 标准仓 60% / 上限分档推进，单次最多增加上限的 10%（至少 1 克）
+- 目标卖出价（招行口径）= `max(breakevenBid + 最小利润, 近20高点 - atrFactor×ATR + sellOffset)`
 
 **持仓中**
 
@@ -329,8 +328,8 @@
 | 触发 | 输出 |
 | --- | --- |
 | 现价 ≥ 目标卖出价 | `sell_take_profit`：建议委托卖出全部或可配置比例 |
-| 5 分钟收盘跌破 15 分钟 EMA20 且已有浮盈 | `sell_trailing`：移动止盈参考价 |
-| 现价 ≤ `平均成本 - 最大可承受亏损 - sellFee` | `sell_stop`：止损参考价 |
+| 最后一根 5 分钟收盘低于 5 分钟 SMA20 且有效浮盈 > 0 | `sell_trailing`：移动止盈参考价 |
+| 统一账本的 `effectivePnlPerGram <= -maxLossPerGram` | `sell_stop`：止损参考价 |
 | 距当日交易时段结束 < 30 分钟仍持仓 **且 `strategy.closeBySessionEnd` 开启** | `close_by_session_end`：日内了结提醒（不自动计算价格）。**v1.9.0 起默认关闭**——不固定倾向于日内了结，关闭时最后半小时继续走止盈/移动止盈/止损/走弱的常规信号链 |
 | RSI14 > 75 且 5 分钟出现阴线吞没/上影 > ATR | `sell_weakness`：减仓参考 |
 
@@ -385,64 +384,37 @@
 - 休市期间条件不进入 `armed`；开盘后按开盘价重新评估。
 - 同一评估周期多条提醒合并为一条摘要（系统通知 + Webhook 各发一份），避免一个 tick 内轰炸。
 - 除常规买卖信号外，还额外跟踪最近一次委托建议；按 §7.4 的 v1.9.0 生命周期语义，仅在冲突/漂移/实质更新时以 `cancel_order` / `order_updated` 边沿提醒，观望与数据缺口保持静默监控。
-- **连续确认语义（v1.3.1）**：`strategy.confirmBars = N` 表示「方向条件在**连续 N 根已收盘的 5 分钟 bar** 上成立」才发出建议——计数以信号道最新已收盘 5m bar 的 `t` 为时钟，同一根 bar 内的多次轮询评估不重复计数。动作脱离方向集（wait / 数据类状态）、信号道品种切换、或 `marketState` 转为 `closed` 时，买卖两条 streak 全部清零重新计数；陈旧的 streak 不会让下一次孤立信号免检通过。
+- **连续确认与冷却语义**：`strategy.confirmBars = N` 表示方向条件需在连续 N 根已收盘 5 分钟 bar 上成立；同一 bar 的重复轮询不重复计数。动作离开方向集、信号道切换、休市或仓位变化会清空 streak。v1.11.0 起仓位变化不再清空 `lastSide/lastAt`，同一 setup 成交后仍受同向冷却约束。
 
-### 7.6 批量回放统计口径与局限（v1.8.0，plan-06）
+### 7.6 回放诊断口径与局限（v1.11.0，report v5）
 
-只读分析功能（不发提醒、不调模型、不改任何策略行为），回答「某入场/出场条件过去 N 个交易日触发几次、事后命中率多少」。路由契约见 §8.11。
+只读分析功能，不发提醒、不调模型、不修改真实持仓。v5 把策略决策与订单成交分开：
 
-**统计口径**
-
-- **统计宇宙（v1.9.0 双道，默认积存金道）**：
-  - `lane: "cmb"`（默认）：回放本机持久化的**招行积存金序列**（实时轮询 + 手动分钟补录），逐日按
-    「sessionDate ≤ D」点时切片——不泄露未来数据，且与实盘完全同口径；全程零网络请求、无反爬限速延迟。
-    深度受本地滚动窗口约束，超出深度的交易日计入 `daysSkippedNoData` 如实跳过（不静默丢弃）；客户卖出价
-    按 `REPLAY_CMB_SPREAD_PER_GRAM = 5` 元/克固定价差合成（bar 序列存的是客户买入价流）。
-  - `lane: "au9999"`：东财 Au99.99 道（K 线历史更深）；招行实时报价无公开历史数据，国际道受合成采样保真度
-    限制，均不入统计并在 caveats 披露。
-- **逐日点时重建（au9999 道）**：对窗口内每个北京交易日 D（复用 market-time 交易日历），各拉一次
-  「截至 D 收盘」的 5m（lmt=500）+ 60m（lmt=300）K 线——`end=<D>` 保证当日评估**不泄露未来数据**
-  （no-lookahead），前一日尾部同时充当指标预热；每 (日, 周期) 进程内仅拉一次并按日缓存。
-- **步进评估**：以当日盘中 5m 收盘 bar 为时间轴，滚动重建 bars 窗口后调用 indicators + computePlan
-  **纯路径**。alert 状态机不参与（统计的是规则本身）；confirmBars 与同向冷却照常生效（属于信号语义），
-  signalState 每日重置。
-- **双模拟通道**：每根 5m bar 按「空仓」（仓位清零、名义预算 100 克，保证 buy_setup 可发）与
-  「持仓」（按当日首个盘中价建仓 100 克，使 sell_* 家族可观察）各评估一次；动作计数为两条通道合计，
-  报告 caveats 中如实说明。
-- **事件与事后追踪**（forward outcomes，按 5m 序列）：入场类（buy_setup / add_position）记录
-  目标价触达率、止损触发率、回本触及率（首次触碰优先）、MFE/MAE（+30m/+60m）、持有至时段结束的
-  净盈亏（扣买入+卖出手续费 + 估算价差 + 滑点）；卖出家族对称地报告「离场后 60 分钟漂移」（负值 =
-  离场优于继续持有）与时段末净节省。聚合层另报 `coverageBlockedRatio`（data_incomplete 步占比）与
-  置信分（≤4 / 5 / 6 / ≥7）×目标命中率分箱。每个事件同时捕获名义手数 `grams`（flat 通道预算 /
-  hold 通道仓位）。
-- **总体表现合并口径（v1.10.0，report v3）**：`report.overall` 把窗口内全部方向性事件合并成一个
-  收益视图——`eventsWithOutcome / entryEvents / exitEvents`、`winRate`（时段末结果为正的事件占比：
-  入场盈利或卖出优于持有）、`avgNetPerGram`（元/克）、`totalNetCny = Σ(sessionEndNet × grams)` 与
-  `avgNetCnyPerEvent`。**披露语义**：每个事件是独立模拟，`totalNetCny` 是「规则质量加总」而非连续
-  持仓的资金曲线（事件之间不串仓、不共享预算）；UI 在卡片旁如实说明。
-- **参数快照与配置感知缓存（v1.10.0）**：`report.params` 附带 `strategy` / `fee` / `limits.maxGrams`
-  快照（UI 展示本报告按哪些参数算的，如收盘前平仓开/关）；缓存键由 `(days, lane)` 扩展为
-  `(days, lane, strategy+fee+fingerprint)`——修改任意策略参数后重新生成会立即重算，不再出现
-  「改了参数一小时内仍看到旧报告」的情况。持仓不在指纹内（两条模拟通道各自合成仓位）。
-- **分钟覆盖率推导**：1m 合成 bar 仅保留约一天，统计窗口的分钟覆盖率由真实 5m K 线拆分为分钟槽推导
-  （含「正在形成的分钟」标记槽，语义对齐实盘轮询），5 分钟内的微观缺口不可见。
+- **统计宇宙**：`lane:"cmb"` 默认使用本机持久化 CMB 序列，`lane:"au9999"` 使用东财历史。新 CMB bar 有真实 ask/bid OHLC 时直接使用；旧单边 bar 只可按固定 5 元/克差生成 proxy bid，`realBidAskCoverage` 不计为真实。
+- **完整时段**：默认枚举最近 N 个已过配置收盘时点的交易日；数据没有到达配置时段尾部则标记 partial 并排除。只有显式 `includePartial:true` 才按截至时点单列，不进入 `sessionEnd*` 指标。
+- **决策与订单**：信号在已收盘 K 线结束时产生 pending limit order，`eligibleAt = signalAt + 5m`。最早从下一根完整 5 分钟 K 线判断：买单 ask low ≤ limit、卖单 bid high ≥ limit 才模拟成交；未触及或超过 `validUntil` 记 expired。没有 5 分钟内部分成交/队列假设。
+- **资金约束**：连续账户从 0 克开始，pending 买单会占用剩余克数预算；同向替代建议先把旧单记为 replaced，避免并发挂单超配。
+- **OHLC 歧义**：同一 bar 同触 target/stop 时 `firstTouch:"ambiguous"`，默认 `conservativeTouch:"stop"`，并输出 `bestCaseNet/worstCaseNet/ambiguityImpactCny`。回本只在 executable/proxy bid high ≥ breakeven 时命中；要求真实双边但缺失时为 unknown。
+- **统一账本**：fill、已实现盈亏、期末估值和成本拆分调用 `ExecutionModel`；report 新增订单/成交/过期数、成交率、平均延迟、真实双边覆盖率、equity curve、最大回撤、turnover、profit factor 与费用/滑点拆分。
+- **独立信号诊断**：空仓/持仓双 pass 仍用于 `perAction` 和规则分箱，但每个 decision 也必须先通过同一 next-bar limit fill/expiry；未成交 decision 保留 `fillStatus`，不产生 target/breakeven/MFE/MAE/session-net outcome，且不与顶部连续账户相加。
+- **兼容**：v4 落盘报告继续原样读取，但客户端显示“旧执行假设，不可与 v5 比较”，且不把 v4 overall/命中率投影成 v5 卡片。
+- **缓存**：键包含窗口、车道、策略/费用、execution/fill/ambiguity policy、partial 与 executable-bid 开关；同键缓存 1 小时。
 
 **已知局限（报告 `caveats` 数组如实携带，设置页展示）**
 
 | caveat | 说明 |
 | --- | --- |
-| `lane-cmb-persisted-bars` | 默认积存金道：本地持久化序列 + 固定 5 元/克合成卖出价，深度受本地数据积累限制 |
-| `lane-au9999-only` | 显式选择的 Au99.99 东财道；结论不能直接套用于招行实盘口径 |
-| `minute-coverage-from-5m` | 分钟覆盖率由 5m K 线拆分，粒度粗于实盘 |
-| `synthetic-lane-sampling` | 合成/低采样道每 bar 样本有限（如国际道 ≤2 样本/bar），精度低于实盘轮询，勿当交易依据 |
-| `history-depth-limited` | au9999 道免费源 5m 深度约 10+ 个交易日（超出深度在 failures 如实列出）；cmb 道受本地滚动窗口约束（不足天数计入 daysSkippedNoData） |
-| `two-simulated-passes` | 双模拟通道口径（空仓 + 当日开盘价持仓） |
-| `past-performance-advisory` | 历史命中率不代表未来表现，仅供调参参考 |
+| `lane-cmb-persisted-bars` | 默认积存金道；旧单边历史按固定 5 元/克生成 proxy bid，新双边历史才计真实覆盖 |
+| `lane-au9999-only` | Au99.99 参考道；不能直接套用于 CMB 执行 |
+| `minute-coverage-from-5m` | 分钟覆盖由 5m K 拆分，无法观察 5 分钟内缺口 |
+| `synthetic-lane-sampling` | synthetic/proxy 路径保真度低于真实双边轮询 |
+| `history-depth-limited` | 免费历史和本地滚动窗口限制样本长度 |
+| `next-bar-limit-fills` | 下一根 K 才可成交，未触及/过期不成交 |
+| `conservative-ambiguous-bars` | 同 K 双触及默认保守止损路径 |
+| `complete-session-only` | 默认只统计数据尾部完整的已结束时段 |
+| `past-performance-advisory` | 工程诊断不是未来表现或样本外证据 |
 
-**工程约束**：单飞行去重（并发 POST 加入同一计算）；同 (窗口, 车道, 参数指纹) 结果缓存 1 小时；
-客户端断开（res close 且响应未完成 → AbortController）在交易日边界取消且不再推进；逐日 await 让出事件循环，
-tick 循环不受影响；中途源失败产出已完成天数的部分报告 + failures 列表；报告落盘
-`storages/dsh-plugin-goldboard/replay-stats.json`（只含聚合层；明细仅在 `detail=true` 时截断至最近 200 条返回，不落盘）。
+**工程约束**：单飞行去重；客户端断开按交易日边界取消；逐日让出事件循环；中途源失败产出部分报告。`replay-stats.json` 持久化 report、orders、fills、pendingOrders 与 trade-compatible 明细；`detail=true` 返回相同生命周期数据，events 仍截断最近 200 条。
 
 ---
 
@@ -574,86 +546,57 @@ tick 循环不受影响；中途源失败产出已完成天数的部分报告 + 
 
 ### 8.10 `POST /dsh-plugin-goldboard/test-notify`
 
-- 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用），用于设置页验证。
+- 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用）。通用 Webhook 统一经过 Host outbound 校验：无凭据 HTTPS、公网 DNS/IP、header allowlist、禁止 redirect；loopback/RFC1918/link-local/metadata 目标返回 `WEBHOOK_URL_BLOCKED`。
 
-### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.8.0，plan-06）
+### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.11.0，report v5）
 
-批量回放统计（口径与局限见 §7.6）。只读分析：不发提醒、不调模型、不改策略行为。
-
-`POST` 请求体（256 KiB 上限内）：
-
-```json
-{ "days": 10, "lane": "cmb", "force": false, "detail": false }
-```
-
-- `lane` 缺省 `"cmb"`（本机积存金序列回放，零网络）；`"au9999"` 走东财 K 线宇宙。
-
-- `days` 默认 10，夹取 [1, 30]；`force=true` 绕过 1 小时同参数缓存；
-  `detail=true` 时响应附带 `events` 数组（截断至最近 `REPLAY_DETAIL_EVENT_CAP = 200` 条）。
-- 单飞行：已有计算在跑时并发请求直接加入同一 Promise。
-- 客户端断开（res close 且 `writableFinished` 为假）→ AbortController 在交易日边界取消，返回
-  `200 { ok:false, status:"cancelled", error:{ code:"REPLAY_STATS_CANCELLED" } }`。
-
-`POST` 成功响应（含部分失败也返回 ok:true）：
+`POST` 请求体：
 
 ```json
 {
-  "ok": true,
-  "cached": false,
-  "report": {
-    "version": 3,
-    "generatedAt": "2026-08-14T04:00:00.000Z",
-    "calculationVersion": "goldboard-indicators-v2",
-    "params": {
-      "days": 10,
-      "lane": "cmb",
-      "fee": { "buyPerGram": 0, "sellPerGram": 5 },
-      "limits": { "maxGrams": 0 },
-      "strategy": { "confirmBars": 2, "scoreThreshold": 5, "closeBySessionEnd": false, "...": "…全部归一化策略参数" }
-    },
-    "window": { "from": "2026-08-03", "to": "2026-08-14" },
-    "daysRequested": 10,
-    "daysEvaluated": 8,
-    "daysSkippedNoData": 1,
-    "daysFailed": 1,
-    "totals": { "steps": 4080, "directionalEvents": 37, "blockedSteps": 512, "coverageBlockedRatio": 0.1255 },
-    "overall": {
-      "eventsWithOutcome": 37,
-      "entryEvents": 15,
-      "exitEvents": 22,
-      "winRate": 0.4865,
-      "avgNetPerGram": -0.31,
-      "totalNetCny": -1146.5,
-      "avgNetCnyPerEvent": -30.99
-    },
-    "perAction": [
-      {
-        "action": "buy_setup",
-        "count": 11,
-        "targetHitRate": 0.3636,
-        "stopHitRate": 0.0909,
-        "breakevenTouchedRate": 0.8182,
-        "avgMfe30m": 0.42,
-        "avgMae30m": 0.55,
-        "avgMfe60m": 0.61,
-        "avgMae60m": 0.78,
-        "avgPostExitDrift60m": null,
-        "sessionEndAvgNet": -4.12,
-        "perLaneSplit": { "AU9999": 11 }
-      }
-    ],
-    "confidenceBuckets": [
-      { "bucket": "≥7", "events": 8, "targetHitRate": 0.5, "avgMfe30m": 0.51, "sessionEndAvgNet": -3.2 }
-    ],
-    "caveats": ["lane-au9999-only", "minute-coverage-from-5m", "synthetic-lane-sampling",
-                 "history-depth-limited", "two-simulated-passes", "past-performance-advisory"],
-    "failures": [{ "day": "2026-08-09", "error": "HTTP 502" }]
+  "days": 10,
+  "lane": "cmb",
+  "force": false,
+  "detail": false,
+  "includePartial": false,
+  "requireExecutableBid": false
+}
+```
+
+- `days` 夹取 [1,30]；`lane` 为 `cmb|au9999`；默认仅完整时段。
+- `includePartial:true` 显式包含当前/尾部不完整时段并按 as-of 标记；`requireExecutableBid:true` 在缺真实 bid path 时把 touch 指标设 unknown。
+- `detail=true` 返回截断 events 以及完整 `orders/fills/pendingOrders/trades`；GET 从内存或落盘读取，v4 文件保持原样可读。
+- 单飞行、1 小时配置感知缓存、断连取消和部分失败信封保持不变。
+
+核心 report 字段：
+
+```json
+{
+  "version": 5,
+  "calculationVersion": "goldboard-indicators-v3",
+  "executionVersion": "goldboard-execution-v1",
+  "fillPolicy": "next-bar-limit",
+  "ambiguityPolicy": "conservative-stop",
+  "completeDays": 8,
+  "partialDays": 0,
+  "excludedDays": 1,
+  "orders": { "placed": 20, "filled": 9, "expired": 7, "pending": 0, "replaced": 4, "ambiguous": 2 },
+  "fillRate": 0.45,
+  "expiryRate": 0.35,
+  "averageDelayMs": 420000,
+  "ambiguousBarCount": 2,
+  "realBidAskCoverage": 0.18,
+  "overall": {
+    "accounting": "continuous-zero-position",
+    "totalNetCny": -120.5,
+    "maxDrawdownCny": -260.2,
+    "equityCurve": [],
+    "costBreakdown": {}
   }
 }
 ```
 
-`GET` 返回最近一次报告（内存 → `storages/dsh-plugin-goldboard/replay-stats.json` 落盘回读，
-幂等只读）；无报告时 `{ ok: true, report: null }`。落盘文件仅含聚合层 `report`，不含事件明细。
+UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行诊断；旧报告显示 legacy 警告。
 
 ---
 
@@ -680,22 +623,14 @@ tick 循环不受影响；中途源失败产出已完成天数的部分报告 + 
 
 - 插槽：`id: "dsh-plugin-goldboard"`，`order: 65`，`locale: NS`。
 - 分区：
-  1. 持仓与上限（克数 / 金额 / 平均成本）
-  2. 手续费（买入 0 / 卖出 5，显示总成本与回本线预览）
+  1. 持仓与上限（分批克数 / 平均成本 / 最大克数）
+  2. 执行成本（报价外显式买卖费、fallback 估算点差、滑点）
   3. 招行积存金价差（买入/卖出各 +1.72 元/克，可负）
   4. 信号阈值（最小利润、最大亏损、ATR 系数、RSI 阈值）
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
-- **策略统计卡片（v1.8.0 plan-06；v1.10.0 重构展示）**：「模型与分析」区旁提供天数选择（10/20/30）、
-  「生成统计」按钮、进度文案。结果分两层：顶部「总体表现」合并卡（合计模拟净收益（元）／综合胜率／
-  平均每事件净益（元/克）／事件构成，附「独立事件加总、非资金曲线」的口径说明）；其下为参数快照行
-  （confirmBars·评分阈值·冷却·收盘前平仓开/关，取自 `report.params`）；明细表按「做多入场信号」与
-  「卖出与减仓信号」分两组，列名带单位（元/克），每个表头 hover 提示解释该列语义——入场组的
-  时段末净益是「买入并持到收盘」，卖出组则是「离场优于持有」。置信分分箱与 caveats 保持不变；
-  进入设置页时 GET 回显最近一次落盘报告（旧 v2 报告无 overall/参数快照时按 per-action 降级展示并
-  隐藏不可得卡片）。全部文案走 `t()` 双语词典，表格样式只用 `--dsw-alias-*` token（表头
-  `bg-layer-2`、行分隔 `border-l1`、净益正 `state-success-primary` / 负 `state-error-primary`）。
+- **回放诊断卡片（v1.11.0 / report v5）**：提供天数选择和生成按钮；顶部先显示 v5 模拟成交警告、完整/部分时段、fill/expiry rate、双触及数和真实 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数及订单状态明细。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
 - **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
   `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
   - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像
@@ -817,7 +752,7 @@ tick 循环不受影响；中途源失败产出已完成天数的部分报告 + 
 
 ## 14. 评审问题确认结果（已逐项 ask-question 确认）
 
-1. 手续费拆分：**买入 0 + 卖出 5**（双边合计 5）。
+1. 配置默认成本：**买入 0 + 卖出 5**；v1.11.0 起定义为报价外显式费用，需按产品协议核对，真实 bid/ask 点差另列。
 2. 交易标的：实际交易**招行积存金**；插件信号用 Au99.99（缺失时用国际金价折算），招行价兜底按国际金价按汇率折算 + 固定价差估算（默认 +1.72 元/克，买卖可分别调）。
 3. 交易时段：**工作日 09:00–次日 02:00**，周末和法定节假日休市。
 4. 提醒：**无冷却、无勿扰**，交易时段内每次阈值穿越都立即提醒。

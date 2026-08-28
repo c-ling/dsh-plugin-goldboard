@@ -251,6 +251,13 @@ test("schema resolution mirrors DEFAULT_CONFIG through normalizeConfig", () => {
   );
 });
 
+test("schema rejects a signal score threshold above the real maximum", () => {
+  assert.throws(
+    () => SETTINGS_SCHEMA({ strategy: { scoreThreshold: 9 } }),
+    /scoreThreshold|8|greater/i,
+  );
+});
+
 test("schema marks webhook secrets and redactSecrets strips exactly those paths", () => {
   const value = SETTINGS_SCHEMA({
     webhooks: {

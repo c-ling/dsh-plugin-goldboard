@@ -189,7 +189,7 @@ export function buildGoldenInput() {
       // Internally consistent with Au99.99≈956 CNY/g at 7.2385 USDCNY
       // (955 × 31.1034768 / 7.2385 ≈ 4103.6 USD/oz) so the domestic-premium
       // disagreement gate stays quiet.
-      CMB: { price: 957.85, buyPrice: 957.85, sellPrice: 958.42, source: "cmb" },
+      CMB: { price: 963.42, buyPrice: 963.42, sellPrice: 958.42, source: "cmb" },
       XAU: {
         price: 4103.6,
         prevClose: 4098.2,

@@ -243,8 +243,9 @@ test("sell_weakness fires on RSI overbought + engulfing bar and sizes a band red
     },
   };
   const config = normalizeConfig({
-    position: { grams: 10, avgCostPerGram: 980 },
-    strategy: { confirmBars: 1 },
+    position: { grams: 10, avgCostPerGram: 990 },
+    fee: { sellPerGram: 0 },
+    strategy: { confirmBars: 1, maxLossPerGram: 100 },
   });
   const plan = computePlan(runtime, config, now);
   assert.equal(plan.action, "sell_weakness", `expected weakness exit, got ${plan.action}: ${plan.reasonCodes.join(",")}`);
@@ -256,8 +257,9 @@ test("sell_weakness fires on RSI overbought + engulfing bar and sizes a band red
 
   // Below the RSI threshold the same bar pattern stays silent.
   const calmConfig = normalizeConfig({
-    position: { grams: 10, avgCostPerGram: 980 },
-    strategy: { confirmBars: 1, weaknessRsi: 99 },
+    position: { grams: 10, avgCostPerGram: 990 },
+    fee: { sellPerGram: 0 },
+    strategy: { confirmBars: 1, weaknessRsi: 99, maxLossPerGram: 100 },
   });
   const calmPlan = computePlan(runtime, calmConfig, now);
   assert.notEqual(calmPlan.action, "sell_weakness");
@@ -311,21 +313,40 @@ test("updatePremiumHistory keeps one running-median entry per day and rolls at 6
 
 // ── 03.3 dynamic CMB spread ─────────────────────────────────────────────────
 
-test("dynamicCmbSpread needs 30 fresh samples and clamps the median into [0, static×3]", () => {
+test("dynamicCmbSpread needs 30 fresh samples and preserves buy/sell offsets", () => {
   const now = Date.now();
   const freshSample = (spreadMid) => ({ t: now - 60_000, spreadMid });
   assert.equal(dynamicCmbSpread([freshSample(1), freshSample(1.1)], now, 1.72), null, "below 30 samples → static");
 
-  const thirty = Array.from({ length: 30 }, (_, i) => ({ t: now - (i + 1) * 60_000, spreadMid: i < 15 ? 1.0 : 1.2 }));
-  const active = dynamicCmbSpread(thirty, now, 1.72);
-  assert.equal(active.spread, 1.1, "median of 30 samples");
+  const legacy = Array.from({ length: 30 }, (_, i) => ({ t: now - (i + 1) * 60_000, spreadMid: i < 15 ? 1.0 : 1.2 }));
+  const active = dynamicCmbSpread(legacy, now, 1.72);
+  assert.equal(active.spread, 1.1, "legacy median remains readable");
+  assert.equal(active.buyOffset, 1.1);
+  assert.equal(active.sellOffset, 1.1);
+  assert.equal(active.legacy, true);
   assert.equal(active.sampleCount, 30);
 
-  const negative = dynamicCmbSpread(Array.from({ length: 30 }, () => freshSample(-0.8)), now, 1.72);
-  assert.equal(negative.spread, 0, "negative median clamps to 0");
+  const sides = Array.from({ length: 30 }, (_, index) => ({
+    t: now - (index + 1) * 60_000,
+    buyOffset: 2.5,
+    sellOffset: -2.5,
+    spreadMid: 0,
+  }));
+  const sideResult = dynamicCmbSpread(sides, now, { buyOffset: 1.72, sellOffset: 1.72 });
+  assert.equal(sideResult.buyOffset, 2.5);
+  assert.equal(sideResult.sellOffset, -2.5);
+  assert.equal(sideResult.legacy, false);
+
+  const zeroAnchor = dynamicCmbSpread(
+    Array.from({ length: 30 }, () => ({ t: now - 60_000, buyOffset: 2.5, sellOffset: -2.5 })),
+    now,
+    { buyOffset: 0, sellOffset: 0 },
+  );
+  assert.equal(zeroAnchor.buyOffset, 2.5, "zero static offset does not erase calibration");
+  assert.equal(zeroAnchor.sellOffset, -2.5);
 
   const huge = dynamicCmbSpread(Array.from({ length: 30 }, () => freshSample(99)), now, 1.72);
-  assert.equal(huge.spread, 5.16, "median clamps to static × 3");
+  assert.equal(huge.spread, 5.16, "pathological legacy median stays bounded");
 });
 
 test("spread samples expire after the TTL and fall back to the static estimate", () => {
@@ -364,15 +385,14 @@ test("snapshot reports spreadSource/spreadSampleCount for dynamic and static fal
   assert.equal(staticSnap.derived.cmb.spreadSource, "static");
   assert.equal(staticSnap.derived.cmb.spreadSampleCount, 0);
   assert.equal(staticSnap.derived.cmb.buyPrice, roundPrice(xauCny + 1.72));
-  assert.match(staticSnap.derived.cmb.sourceNote, /元\/克估算/);
-  assert.doesNotMatch(staticSnap.derived.cmb.sourceNote, /动态校准/);
+  assert.equal(staticSnap.derived.cmb.sourceNote, "cmb-synthetic-bid-ask");
 
   const samples = Array.from({ length: 31 }, (_, i) => ({ t: NOW - (i + 1) * 60_000, spreadMid: 1.0 }));
   const dynamicSnap = buildSnapshot(cmbFallbackRuntime(samples), DEFAULT_CONFIG, now);
-  assert.equal(dynamicSnap.derived.cmb.spreadSource, "dynamic-estimate");
+  assert.equal(dynamicSnap.derived.cmb.spreadSource, "dynamic-legacy");
   assert.equal(dynamicSnap.derived.cmb.spreadSampleCount, 31);
   assert.equal(dynamicSnap.derived.cmb.buyPrice, roundPrice(xauCny + 1.0));
-  assert.match(dynamicSnap.derived.cmb.sourceNote, /动态校准/);
+  assert.equal(dynamicSnap.derived.cmb.sourceNote, "cmb-synthetic-bid-ask");
 
   const liveRuntime = cmbFallbackRuntime([]);
   liveRuntime.quotes.XAU = null;
@@ -380,6 +400,7 @@ test("snapshot reports spreadSource/spreadSampleCount for dynamic and static fal
   liveRuntime.quotes.CMB = { price: 952, buyPrice: 952, sellPrice: 950, source: "cmb", updatedAt: NOW };
   const liveSnap = buildSnapshot(liveRuntime, DEFAULT_CONFIG, now);
   assert.equal(liveSnap.derived.cmb.spreadSource, "live");
+  assert.equal(liveSnap.derived.cmb.sourceNote, "cmb-live-bid-ask");
   assert.equal(liveSnap.plan.signalLane, "CMB", "snapshot exposes the resolved signal lane");
 });
 
@@ -534,23 +555,28 @@ test("dispatchAlert reports one-ok-one-fail channel outcomes for the alerts log"
       generic: [{ id: "g1", name: "mirror", enabled: true, url: "https://generic.example/hook" }],
     },
   });
-  const previousFetch = __setFetchImpl(async (url) => {
+  const post = async (url) => {
     if (String(url).includes("feishu.example")) throw new Error("gateway 502");
     return { ok: true, status: 200, text: async () => "{}", arrayBuffer: async () => Buffer.from("{}") };
-  });
-  try {
-    const warnings = [];
-    const results = await dispatchAlert(config, { title: "t", body: "b", params: {} }, { warn: (line) => warnings.push(line) });
-    assert.deepEqual(results.map((entry) => [entry.channel, entry.ok]), [
-      ["feishu", false],
-      ["generic:g1", true],
-    ]);
-    assert.match(results[0].error, /502/);
-    assert.equal(results[1].error, undefined);
-    assert.equal(warnings.length, 1, "failures still logged as warnings");
-  } finally {
-    __setFetchImpl(previousFetch);
-  }
+  };
+  const warnings = [];
+  const results = await dispatchAlert(
+    config,
+    { title: "t", body: "b", params: {} },
+    { warn: (line) => warnings.push(line) },
+    {
+      post,
+      genericLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+      genericTransport: async () => ({ ok: true, status: 200, text: async () => "{}" }),
+    },
+  );
+  assert.deepEqual(results.map((entry) => [entry.channel, entry.ok]), [
+    ["feishu", false],
+    ["generic:g1", true],
+  ]);
+  assert.match(results[0].error, /502/);
+  assert.equal(results[1].error, undefined);
+  assert.equal(warnings.length, 1, "failures still logged as warnings");
 });
 
 // ── helpers ─────────────────────────────────────────────────────────────────

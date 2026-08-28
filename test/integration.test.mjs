@@ -308,12 +308,14 @@ test("integration: legacy state without barsSeedVersion drops the corrupt intrad
     // no barsSeedVersion → pre-plan-01 format
     alertState: {},
   }), "utf8");
-  t.after(() => rm(dir, { recursive: true, force: true }));
   const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
   t.after(() => __setFetchImpl(previousFetch));
 
   const h = await boot({ config: { directory: dir } });
-  t.after(() => h.dispose());
+  t.after(async () => {
+    await h.dispose();
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  });
   const snap = await h.call("/dsh-plugin-goldboard/snapshot", "GET");
   assert.equal(snap.status, 200);
   assert.equal(snap.body.ok, true);
@@ -537,6 +539,61 @@ test("integration: alert edges fire once, record sentTo per channel, and re-fire
   assert.ok(["order_updated", "cancel_order", "sell_stop"].includes(h.runtime.lastAlertLog[0]?.action), `log head records the edge (${h.runtime.lastAlertLog[0]?.action})`);
 });
 
+test("integration: generic test-notify route handles missing, success and failure", async (t) => {
+  freezeSession(t);
+  const sent = [];
+  let failPost = false;
+  const genericLookup = async () => [{ address: "93.184.216.34", family: 4 }];
+  const genericTransport = async (validated, value, headers) => {
+    if (failPost) throw new Error("generic transport failed");
+    sent.push({ validated, value, headers });
+    return { ok: true, status: 200, text: async () => "" };
+  };
+  const previousFetch = __setFetchImpl(async () => { throw new Error("no market network in test"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  const h = await boot({
+    config: {
+      genericLookup,
+      genericTransport,
+      webhooks: {
+        generic: [{
+          id: "generic-1",
+          name: "Audit hook",
+          enabled: true,
+          url: "https://hooks.example.com/gold",
+          headers: { "X-Signature": "abc" },
+          bodyTemplate: "",
+        }],
+      },
+    },
+  });
+  t.after(() => h.dispose());
+
+  const missing = await h.call("/dsh-plugin-goldboard/test-notify", "POST", {
+    body: { channel: "generic", genericId: "missing" },
+  });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.error.code, "GENERIC_NOT_FOUND");
+
+  const success = await h.call("/dsh-plugin-goldboard/test-notify", "POST", {
+    body: { channel: "generic", genericId: "generic-1" },
+  });
+  assert.equal(success.status, 200);
+  assert.equal(success.body.ok, true);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].validated.url, "https://hooks.example.com/gold");
+  assert.equal(sent[0].validated.address, "93.184.216.34");
+  assert.equal(sent[0].headers["x-signature"], "abc");
+  assert.equal(typeof sent[0].value.text, "string");
+
+  failPost = true;
+  const failed = await h.call("/dsh-plugin-goldboard/test-notify", "POST", {
+    body: { channel: "generic", genericId: "generic-1" },
+  });
+  assert.equal(failed.status, 500);
+  assert.equal(failed.body.error.code, "NOTIFY_FAILED");
+});
+
 // ── 7. analysis run: scripted success and INVALID_JSON both hit the log ─────
 
 test("integration: analysis run records success and invalid outcomes in the analysis log", async (t) => {
@@ -668,18 +725,23 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(started.body.ok, true);
   assert.equal(started.body.cached, false);
   const report = started.body.report;
-  assert.equal(report.version, 4); // v4 wire: continuous zero-position account + params snapshot
+  assert.equal(report.version, 5);
+  assert.match(report.reportId, /^replay-/);
+  assert.equal(report.fillPolicy, "next-bar-limit");
+  assert.equal(report.ambiguityPolicy, "conservative-stop");
   assert.equal(report.params.days, 2);
   assert.equal(report.params.lane, "au9999");
   assert.equal(report.daysRequested, 2);
   assert.equal(report.daysEvaluated, 2);
-  assert.deepEqual(report.window, { from: "2026-08-13", to: "2026-08-14" });
+  assert.deepEqual(report.window, { from: "2026-08-12", to: "2026-08-13" });
+  assert.equal(report.completeDays, 2);
+  assert.equal(report.partialDays, 0);
   assert.ok(report.totals.steps >= 2 * 204 * 2 * 0.9, `steps cover both passes (${report.totals.steps})`);
   assert.ok(Array.isArray(report.perAction));
   assert.equal(report.failures.length, 0);
 
   // Point-in-time pulls: exactly one 5m + one 60m request per day.
-  const dayPulls = calls.filter((call) => call.endsWith("20260813") || call.endsWith("20260814"));
+  const dayPulls = calls.filter((call) => call.endsWith("20260812") || call.endsWith("20260813"));
   assert.equal(dayPulls.length, 4);
 
   // Same-window repeat → TTL cache; GET serves the same report idempotently.
@@ -690,12 +752,16 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(fetched.status, 200);
   assert.equal(fetched.body.ok, true);
   assert.deepEqual(fetched.body.report, report);
-  assert.ok(Array.isArray(fetched.body.trades), "detail response includes continuous trades");
+  assert.ok(Array.isArray(fetched.body.trades), "detail response includes simulated fills as trade-compatible rows");
+  assert.ok(Array.isArray(fetched.body.orders), "detail response includes order lifecycle rows");
+  assert.ok(Array.isArray(fetched.body.fills), "detail response includes v5 fills");
 
   // Report persisted next to state.json.
   const persisted = JSON.parse(await readFile(join(h.dir, "replay-stats.json"), "utf8"));
-  assert.equal(persisted.report.version, 4);
-  assert.ok(Array.isArray(persisted.trades), "continuous trade details persist");
+  assert.equal(persisted.report.version, 5);
+  assert.ok(Array.isArray(persisted.trades), "continuous fill-compatible details persist");
+  assert.ok(Array.isArray(persisted.orders));
+  assert.ok(Array.isArray(persisted.fills));
 });
 
 test("integration: mid-window source failure surfaces as a partial report on the route", async (t) => {
@@ -703,7 +769,7 @@ test("integration: mid-window source failure surfaces as a partial report on the
   const calls = [];
   const stub = replayKlineStub(calls);
   const previousFetch = __setFetchImpl(async (url) => {
-    if (String(url).includes("end=20260814")) throw new Error("day-2 source down");
+    if (String(url).includes("end=20260813")) throw new Error("day-2 source down");
     return stub(url);
   });
   t.after(() => __setFetchImpl(previousFetch));
@@ -715,7 +781,7 @@ test("integration: mid-window source failure surfaces as a partial report on the
   assert.equal(result.body.ok, true);
   assert.equal(result.body.report.daysEvaluated, 1);
   assert.equal(result.body.report.daysFailed, 1);
-  assert.deepEqual(result.body.report.failures, [{ day: "2026-08-14", error: "day-2 source down" }]);
+  assert.deepEqual(result.body.report.failures, [{ day: "2026-08-13", error: "day-2 source down" }]);
 });
 
 // ── 10. dispose: the final flush is awaited ─────────────────────────────────

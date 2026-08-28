@@ -46,6 +46,50 @@ test("quote normalization keeps spot XAU and Yahoo GC=F futures distinct", () =>
   assert.equal(cmb.spread, 5);
 });
 
+test("quote timestamps normalize compact Beijing, epoch seconds/milliseconds and ISO inputs consistently", () => {
+  const receivedAt = Date.parse("2026-08-28T12:03:00.000Z");
+  const compact = normalizeQuoteRecord("USDCNY", {
+    price: 6.8,
+    source: "tencent",
+    time: "20260828200250",
+  }, receivedAt);
+  assert.equal(compact.sourceTimestamp, "2026-08-28T12:02:50.000Z");
+
+  const epoch = normalizeQuoteRecord("XAU", { price: 4_000, source: "test", sourceTimestamp: receivedAt }, receivedAt);
+  assert.equal(epoch.sourceTimestamp, "2026-08-28T12:03:00.000Z");
+
+  const iso = normalizeQuoteRecord("XAU", { price: 4_000, source: "test", sourceTimestamp: "2026-08-28T12:01:00.000Z" }, receivedAt);
+  assert.equal(iso.sourceTimestamp, "2026-08-28T12:01:00.000Z");
+
+  const epochSeconds = Math.floor(receivedAt / 1000);
+  const secondsNumber = normalizeQuoteRecord("XAU", { price: 4_000, source: "test", sourceTimestamp: epochSeconds }, receivedAt);
+  const secondsString = normalizeQuoteRecord("XAU", { price: 4_000, source: "test", sourceTimestamp: String(epochSeconds) }, receivedAt);
+  assert.equal(secondsNumber.sourceTimestamp, "2026-08-28T12:03:00.000Z");
+  assert.equal(secondsString.sourceTimestamp, "2026-08-28T12:03:00.000Z");
+
+  const invalid = normalizeQuoteRecord("XAU", { price: 4_000, source: "test", sourceTimestamp: "not-a-date" }, receivedAt);
+  assert.equal(invalid.sourceTimestamp, undefined);
+});
+
+test("quality blocks timestamps materially in the future", () => {
+  const now = new Date("2026-08-28T12:03:00.000Z");
+  const quality = assessMarketQuality({
+    now,
+    quote: normalizeQuoteRecord("XAU", {
+      price: 4_000,
+      source: "test",
+      sourceTimestamp: "2026-08-28T12:10:00.000Z",
+    }, now.getTime()),
+    coverage: { 5: 1, 10: 1, 30: 1, 60: 1 },
+    requiredCoverage: [],
+    indicators: { ind5: { count: 20, warmupReady: true, planWarmupReady: true } },
+    marketState: "open",
+  });
+  assert.equal(quality.ready, false);
+  assert.ok(quality.reasonCodes.includes("timestamp_future"));
+  assert.equal(quality.quote.futureSkewMs, 7 * 60_000);
+});
+
 test("closedBars excludes the active bucket and preserves synthetic metadata", () => {
   const now = new Date("2026-08-14T02:03:00Z");
   const series = [
@@ -93,6 +137,37 @@ test("quality module blocks stale, invalid and under-warmed inputs", () => {
   assert.ok(quality.reasonCodes.includes("bars_invalid"));
   assert.ok(quality.reasonCodes.includes("data_incomplete_30m"));
   assert.ok(quality.reasonCodes.includes("indicator_warmup"));
+});
+
+test("quality blocks a compound XAU quote when its FX dependency is stale or future", () => {
+  const now = new Date("2026-08-28T12:03:00.000Z");
+  const quality = assessMarketQuality({
+    now,
+    quote: { price: 4_000, updatedAt: now.getTime(), staleAfterMs: 15 * 60_000, instrument: "XAU/USD", market: "spot" },
+    dependencies: [
+      { id: "XAU", quote: { price: 4_000, updatedAt: now.getTime(), sourceTimestamp: "2026-08-28T12:02:00.000Z" } },
+      { id: "USDCNY", quote: { price: 6.8, updatedAt: now.getTime(), sourceTimestamp: "2026-08-28T11:40:00.000Z" } },
+    ],
+    coverage: { 5: 1, 10: 1, 30: 1, 60: 1 },
+    requiredCoverage: [],
+    indicators: { ind5: { count: 20, warmupReady: true, planWarmupReady: true } },
+    marketState: "open",
+    expectedMarket: "spot",
+  });
+  assert.equal(quality.ready, false);
+  assert.ok(quality.reasonCodes.includes("dependency_stale"));
+  assert.equal(quality.dependencies.find((entry) => entry.id === "USDCNY").stale, true);
+
+  const future = assessMarketQuality({
+    now,
+    quote: { price: 4_000, updatedAt: now.getTime(), staleAfterMs: 15 * 60_000 },
+    dependencies: [{ id: "USDCNY", quote: { price: 6.8, updatedAt: now.getTime(), sourceTimestamp: "2026-08-28T12:10:00.000Z" } }],
+    coverage: {},
+    requiredCoverage: [],
+    indicators: { ind5: { count: 20, warmupReady: true, planWarmupReady: true } },
+    marketState: "open",
+  });
+  assert.ok(future.reasonCodes.includes("dependency_future"));
 });
 
 test("quality applies the 60% coverage threshold to 30/60-minute windows", () => {

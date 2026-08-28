@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   BARS_SEED_VERSION,
   DEFAULT_CONFIG,
+  CONFIDENCE_MAX,
   __setFetchImpl,
   __setQuoteChainTiming,
   aggregateSubBars,
@@ -54,6 +55,7 @@ import {
   parseYahooFinanceKlines,
   parseYahooFinanceQuote,
   readApiLogsFromFile,
+  recordTick,
   redactConfig,
   resampleBars,
   restoreRuntimeState,
@@ -64,6 +66,7 @@ import {
   snapshotCacheStale,
   windowCoverage,
 } from "../lib/index.js";
+import { sendGeneric, validateGenericWebhookConfig } from "../lib/alerts.js";
 
 /** Build `minutes` minute-aligned 1m bars ending at `now` (a Date or ms). */
 test("analysis model timeout defaults to 60 seconds", () => {
@@ -120,6 +123,7 @@ test("normalizeConfig applies defaults and sanitizes input", () => {
   assert.deepEqual(config.tradingHours.holidays, ["2026-10-01"]);
   assert.equal(config.webhooks.generic[0].id, "wh-1");
   assert.equal(config.webhooks.generic[0].name, "n");
+  assert.equal(normalizeConfig({ strategy: { scoreThreshold: 10 } }).strategy.scoreThreshold, CONFIDENCE_MAX);
 });
 
 test("manual prev close overrides are normalized and applied to snapshots", () => {
@@ -142,6 +146,47 @@ test("manual prev close overrides are normalized and applied to snapshots", () =
   assert.equal(snap.quotes.AU9999.prevClose, 123.45);
   assert.equal(snap.quotes.XAU.prevClose, 4567.89);
   assert.equal(snap.manualPrevClose.CMB, 888.88);
+});
+
+test("recordTick persists real CMB ask/bid OHLC alongside the legacy price bar", () => {
+  const bars = { 1: [], 5: [], 15: [], 60: [], 1440: [] };
+  const first = Date.parse("2026-08-14T02:00:10.000Z");
+  recordTick(bars, {
+    price: 105,
+    buyPrice: 105,
+    sellPrice: 100,
+    source: "cmb",
+    instrument: "CMB_ACCUMULATED_GOLD",
+  }, first);
+  recordTick(bars, {
+    price: 106,
+    buyPrice: 106,
+    sellPrice: 99,
+    source: "cmb",
+    instrument: "CMB_ACCUMULATED_GOLD",
+  }, first + 20_000);
+  const bar = bars[1][0];
+  assert.equal(bar.askO, 105);
+  assert.equal(bar.askH, 106);
+  assert.equal(bar.askL, 105);
+  assert.equal(bar.askC, 106);
+  assert.equal(bar.bidO, 100);
+  assert.equal(bar.bidH, 100);
+  assert.equal(bar.bidL, 99);
+  assert.equal(bar.bidC, 99);
+  assert.equal(bar.executionSideComplete, true);
+
+  recordTick(bars, { price: 104, source: "xau-fx-derived" }, first + 30_000);
+  assert.equal(bar.executionSideComplete, false, "a later one-sided tick invalidates real side completeness");
+  assert.equal(bar.askO, undefined);
+  assert.equal(bar.bidO, undefined);
+
+  const nextMinute = first + 60_000;
+  recordTick(bars, { price: 104, source: "xau-fx-derived" }, nextMinute);
+  recordTick(bars, { price: 105, buyPrice: 105, sellPrice: 100, source: "cmb" }, nextMinute + 20_000);
+  const reverseMixed = bars[1][1];
+  assert.equal(reverseMixed.executionSideComplete, false, "a late live tick cannot certify an earlier one-sided path");
+  assert.equal(reverseMixed.askO, undefined);
 });
 
 test("manual CMB minute entries are parsed and applied without overwriting existing bars", () => {
@@ -385,11 +430,12 @@ test("snapshot exposes CMB live price when available and falls back to spread es
     plan: null,
   }, DEFAULT_CONFIG, now);
   assert.equal(fallbackSnapshot.derived.cmb.buyPrice, 950.23);
-  assert.equal(fallbackSnapshot.derived.cmb.sellPrice, 950.23);
-  assert.equal(fallbackSnapshot.derived.cmb.sellPriceAfterFee, 945.23);
+  assert.equal(fallbackSnapshot.derived.cmb.sellPrice, 950.03);
+  assert.equal(fallbackSnapshot.derived.cmb.sellPriceAfterFee, 944.83);
+  assert.equal(fallbackSnapshot.derived.cmb.costComponents.explicitFeePerGram, 5);
+  assert.equal(fallbackSnapshot.derived.cmb.costComponents.slippagePerGram, 0.2);
   assert.equal(fallbackSnapshot.derived.cmb.live, false);
-  assert.match(fallbackSnapshot.derived.cmb.sourceNote, /国际金价/);
-  assert.doesNotMatch(fallbackSnapshot.derived.cmb.sourceNote, /Au99\.99/);
+  assert.equal(fallbackSnapshot.derived.cmb.sourceNote, "cmb-synthetic-bid-ask");
   assert.equal(fallbackSnapshot.market.state, "closed");
   assert.equal(fallbackSnapshot.market.nextOpen, "2026-08-17T01:00:00.000Z");
 
@@ -405,9 +451,10 @@ test("snapshot exposes CMB live price when available and falls back to spread es
   }, DEFAULT_CONFIG, now);
   assert.equal(liveSnapshot.derived.cmb.buyPrice, 960.43);
   assert.equal(liveSnapshot.derived.cmb.sellPrice, 955.43);
-  assert.equal(liveSnapshot.derived.cmb.sellPriceAfterFee, 955.43);
+  assert.equal(liveSnapshot.derived.cmb.sellPriceAfterFee, 950.23);
   assert.equal(liveSnapshot.derived.cmb.average, 957.93);
   assert.equal(liveSnapshot.derived.cmb.live, true);
+  assert.equal(liveSnapshot.derived.cmb.sourceNote, "cmb-live-bid-ask");
   assert.equal(liveSnapshot.quotes.CMB.price, 960.43);
   assert.equal(liveSnapshot.quotes.CMB.average, 957.93);
   assert.equal(liveSnapshot.trend.CMB_1m.length, 0);
@@ -428,7 +475,7 @@ test("plan engine uses international-converted fallback when CMB and Au99.99 are
   assert.equal(plan.action, "wait");
   assert.equal(plan.instrument, "XAU");
   assert.equal(plan.signalPrice, 948.51);
-  assert.equal(plan.cmbEstimatedPrice, 950.23);
+  assert.equal(plan.cmbEstimatedPrice, 950.03);
 });
 
 test("indicator helpers produce expected values", () => {
@@ -520,11 +567,54 @@ test("plan engine uses live CMB prices when provided", () => {
   assert.equal(plan.marketState, "open");
   assert.equal(plan.action, "sell_take_profit");
   assert.equal(plan.position.cmbNow, 970.43);
-  assert.equal(plan.position.feeAdjustedPnl, 254.3);
-  assert.equal(plan.breakeven, 952.2);
+  assert.equal(plan.position.feeAdjustedPnl, 200.3);
+  assert.equal(plan.position.effectiveExitPrice, 965.23);
+  assert.equal(plan.position.effectiveEntryPrice, 945.2);
+  assert.equal(plan.breakeven, 950.4);
+  assert.equal(plan.stopPrice, 948.4);
   assert.equal(plan.signalPrice, 974.43);
   assert.equal(plan.suggestedOrder.cmbEstimatedPrice, 970.43);
   assert.equal(plan.suggestedOrder.price, 970.43);
+});
+
+test("fallback and live stop logic trigger at the configured effective loss", () => {
+  const now = new Date("2026-08-14T02:00:00Z");
+  const config = normalizeConfig({
+    position: { grams: 10, avgCostPerGram: 100 },
+    fee: { sellPerGram: 2 },
+    strategy: { maxLossPerGram: 2, slippagePerGram: 0.5 },
+  });
+  const liveRuntime = {
+    quotes: {
+      AU9999: null,
+      CMB: { price: 105, buyPrice: 105, sellPrice: 101, source: "cmb", updatedAt: now.getTime() },
+      XAU: null,
+      USDCNY: null,
+    },
+    bars: { AU9999: { 1: [], 5: [], 60: [] }, XAU: { 1: [], 5: [], 60: [] }, CMB: { 1: oneMinBars(now, 60), 5: [], 60: [] } },
+  };
+  const livePlan = computePlan(liveRuntime, config, now);
+  assert.equal(livePlan.position.profitPerGram, -2);
+  assert.equal(livePlan.stopPrice, 101);
+  assert.equal(livePlan.action, "sell_stop");
+
+  const fallbackRuntime = {
+    quotes: {
+      AU9999: { price: 101.2, bid: 101.1, ask: 101.3, source: "test", updatedAt: now.getTime() },
+      CMB: null,
+      XAU: null,
+      USDCNY: null,
+    },
+    bars: { AU9999: { 1: oneMinBars(now, 60, 101.2), 5: [], 60: [] }, XAU: { 1: [], 5: [], 60: [] }, CMB: { 1: [], 5: [], 60: [] } },
+  };
+  const fallbackConfig = normalizeConfig({
+    ...config,
+    cmb: { buySpreadPerGram: 0, sellSpreadPerGram: 0 },
+    strategy: { ...config.strategy, estimatedSpreadPerGram: 0.2 },
+  });
+  const fallbackPlan = computePlan(fallbackRuntime, fallbackConfig, now);
+  assert.equal(fallbackPlan.position.profitPerGram, -2);
+  assert.equal(fallbackPlan.action, "sell_stop");
 });
 
 test("plan engine still works with live CMB when Au99.99 is missing", () => {
@@ -798,7 +888,7 @@ test("plan engine applies same-direction cooldown when signalState is present", 
   assert.equal(plan.suggestedOrder, null);
 });
 
-test("plan engine resets cooldown when user position changes", () => {
+test("plan engine preserves same-side cooldown when user position changes", () => {
   const now = new Date("2026-08-14T02:00:00Z");
   const runtime = {
     quotes: {
@@ -827,9 +917,11 @@ test("plan engine resets cooldown when user position changes", () => {
     strategy: { signalCooldownMinutes: 30, confirmBars: 1 },
   });
   const plan = computePlan(runtime, config, now);
-  assert.equal(plan.action, "sell_take_profit");
-  assert.equal(plan.suggestedOrder.side, "sell");
-  assert.ok(!plan.reasonCodes.includes("cooldown_active"));
+  assert.equal(plan.action, "wait");
+  assert.equal(plan.suggestedOrder, null);
+  assert.ok(plan.reasonCodes.includes("cooldown_active"));
+  assert.equal(plan.signalState.lastPositionGrams, 10);
+  assert.equal(plan.signalState.lastSide, "sell");
 });
 
 test("plan engine requires consecutive confirmation before issuing a buy signal", () => {
@@ -1001,8 +1093,8 @@ test("coverage re-anchors below an outage seam instead of staying poisoned", () 
   assert.equal(windowCoverage(blip, now, 10, config), 0.9);
 });
 
-test("resampleBars aggregates 5m bars into 10m/30m bars", () => {
-  const end = Date.parse("2026-08-14T02:00:00Z"); // on both 5m and 10m boundaries
+test("resampleBars aggregates by natural 10m/30m buckets and marks partial buckets", () => {
+  const end = Date.parse("2026-08-14T01:55:00Z");
   const bars5 = [];
   for (let i = 0; i < 12; i += 1) {
     const t = end - (11 - i) * 5 * 60_000;
@@ -1010,23 +1102,38 @@ test("resampleBars aggregates 5m bars into 10m/30m bars", () => {
   }
   const bars10 = resampleBars(bars5, 2);
   assert.equal(bars10.length, 6);
-  assert.equal(bars10[0].t, end - 50 * 60_000);
+  assert.equal(bars10[0].t, Date.parse("2026-08-14T01:00:00Z"));
   assert.equal(bars10[0].o, 940);
   assert.equal(bars10[0].h, 943);
   assert.equal(bars10[0].l, 939);
   assert.equal(bars10[0].c, 942);
-  assert.equal(bars10[5].t, end);
+  assert.equal(bars10[0].partial, false);
+  assert.equal(bars10[5].t, Date.parse("2026-08-14T01:50:00Z"));
   assert.equal(bars10[5].c, 952);
 
   const bars30 = resampleBars(bars5, 6);
   assert.equal(bars30.length, 2);
-  assert.equal(bars30[0].t, end - 30 * 60_000);
+  assert.equal(bars30[0].t, Date.parse("2026-08-14T01:00:00Z"));
   assert.equal(bars30[0].o, 940);
   assert.equal(bars30[0].h, 947);
   assert.equal(bars30[0].c, 946);
-  assert.equal(bars30[1].t, end);
+  assert.equal(bars30[1].t, Date.parse("2026-08-14T01:30:00Z"));
   assert.equal(bars30[1].o, 946);
   assert.equal(bars30[1].c, 952);
+
+  const shiftedStart = bars5.slice(3, 7); // 01:15..01:30 crosses a natural boundary
+  const shifted30 = resampleBars(shiftedStart, 6);
+  assert.equal(shifted30.length, 2, "bars never cross a natural 30m boundary");
+  assert.deepEqual(shifted30.map((bar) => bar.t), [
+    Date.parse("2026-08-14T01:00:00Z"),
+    Date.parse("2026-08-14T01:30:00Z"),
+  ]);
+  assert.ok(shifted30.every((bar) => bar.partial === true));
+
+  const missingChild = resampleBars(bars5.slice(0, 6).filter((_, index) => index !== 2), 6);
+  assert.equal(missingChild[0].partial, true);
+  assert.equal(missingChild[0].sampleCount, 5);
+  assert.equal(missingChild[0].expectedSamples, 6);
   assert.deepEqual(resampleBars([], 2), []);
 });
 
@@ -1090,25 +1197,54 @@ test("plan engine requires EMA20 rising on 10/30/60m for the trend filter", () =
   assert.equal(plan.suggestedOrder, null);
 });
 
-test("snapshot exposes data coverage alongside an incomplete plan", () => {
+test("snapshot values a position from fresh bid even when strategy data is incomplete", () => {
   const now = new Date("2026-08-14T02:00:00Z");
+  const config = normalizeConfig({
+    position: { grams: 10, avgCostPerGram: 100 },
+    fee: { buyPerGram: 0, sellPerGram: 2 },
+    strategy: { slippagePerGram: 0.5 },
+  });
   const snap = buildSnapshot({
     quotes: {
       AU9999: { price: 950, prevClose: 940.72, source: "test", updatedAt: now.getTime() },
-      XAU: { price: 4375.8, prevClose: 4350.88, source: "test", updatedAt: now.getTime() },
-      USDCNY: { price: 6.7421, source: "test", updatedAt: now.getTime() },
+      CMB: { price: 105, buyPrice: 105, sellPrice: 95, source: "cmb", updatedAt: now.getTime() },
+      XAU: null,
+      USDCNY: null,
     },
     bars: {
       AU9999: { 1: [], 5: [], 60: [] },
-      XAU: { 1: thinnedOneMinBars(now, 60, 14), 5: [] },
-      CMB: { 1: [], 5: [] },
+      XAU: { 1: [], 5: [] },
+      CMB: { 1: thinnedOneMinBars(now, 60, 14), 5: [] },
     },
     plan: null,
-  }, DEFAULT_CONFIG, now);
+  }, config, now);
   assert.equal(snap.plan.action, "data_incomplete");
   assert.equal(snap.plan.dataCoverage[60], 0.5);
   assert.equal(snap.plan.dataCoverage[5], 1);
   assert.equal(snap.plan.suggestedOrder, null);
+  assert.equal(snap.position.valuationAvailable, true);
+  assert.equal(snap.position.effectiveExitPrice, 92.5);
+  assert.equal(snap.position.effectiveEntryPrice, 100.5);
+  assert.equal(snap.position.feeAdjustedPnl, -80);
+});
+
+test("snapshot reports unavailable valuation instead of zero for a stale executable bid", () => {
+  const now = new Date("2026-08-14T02:00:00Z");
+  const config = normalizeConfig({ position: { grams: 10, avgCostPerGram: 100 } });
+  const snap = buildSnapshot({
+    quotes: {
+      AU9999: null,
+      CMB: { price: 105, buyPrice: 105, sellPrice: 95, source: "cmb", updatedAt: now.getTime() - 20 * 60_000 },
+      XAU: null,
+      USDCNY: null,
+    },
+    bars: { AU9999: { 1: [] }, XAU: { 1: [] }, CMB: { 1: [], 5: [], 60: [] } },
+    plan: null,
+  }, config, now);
+  assert.equal(snap.plan.action, "data_stale");
+  assert.equal(snap.position.valuationAvailable, false);
+  assert.equal(snap.position.feeAdjustedPnl, null);
+  assert.equal(snap.position.valuationReasonCode, "execution_bid_unavailable");
 });
 
 test("plan engine prefers XAU-converted signal over Au99.99 when CMB is not live", () => {
@@ -1142,7 +1278,7 @@ test("plan engine falls back to Au99.99 when no international conversion is avai
   assert.equal(plan.signalPrice, 950);
   assert.equal(plan.action, "wait");
   // 招行价按 Au99.99 + 价差估算（+1.72）
-  assert.equal(plan.cmbEstimatedPrice, 951.72);
+  assert.equal(plan.cmbEstimatedPrice, 951.52);
 });
 
 test("plan engine checks only 5/10m coverage during the first hour of a session", () => {
@@ -1270,6 +1406,66 @@ test("plan engine does not relax 30/60m coverage after 01:00 Beijing", () => {
   assert.ok(!plan.reasonCodes.includes("data_incomplete_5m"));
 });
 
+test("generic webhook validation pins public DNS and blocks unsafe targets or headers", async () => {
+  const publicConfig = await validateGenericWebhookConfig({
+    url: "https://hooks.example.com/path",
+    headers: { Authorization: "Bearer token", "X-Signature": "abc" },
+  }, { lookup: async () => [{ address: "93.184.216.34", family: 4 }] });
+  assert.equal(publicConfig.url, "https://hooks.example.com/path");
+  assert.equal(publicConfig.address, "93.184.216.34");
+  assert.deepEqual(publicConfig.headers, { authorization: "Bearer token", "x-signature": "abc" });
+
+  const blocked = async (cfg, options = {}) => assert.rejects(
+    validateGenericWebhookConfig(cfg, options),
+    (error) => error?.code === "WEBHOOK_URL_BLOCKED",
+  );
+  await blocked({ url: "http://example.com" });
+  await blocked({ url: "https://user:secret@example.com" });
+  await blocked({ url: "https://127.0.0.1/hook" });
+  await blocked({ url: "https://[::1]/hook" });
+  await blocked({ url: "https://[::ffff:127.0.0.1]/hook" });
+  await blocked({ url: "https://[fc00::1]/hook" });
+  await blocked({ url: "https://[fe80::1]/hook" });
+  await blocked({ url: "https://localhost/hook" });
+  await blocked({ url: "https://host.local/hook" });
+  await blocked({ url: "https://metadata.example/hook" }, {
+    lookup: async () => [{ address: "169.254.169.254", family: 4 }],
+  });
+  await blocked({ url: "https://mixed.example/hook" }, {
+    lookup: async () => [
+      { address: "93.184.216.34", family: 4 },
+      { address: "10.0.0.1", family: 4 },
+    ],
+  });
+  await blocked({ url: "https://example.com", headers: { Host: "internal" } }, {
+    lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+  });
+  await blocked({ url: "https://example.com", headers: { "X-Test": "ok\r\nHost: internal" } }, {
+    lookup: async () => [{ address: "93.184.216.34", family: 4 }],
+  });
+});
+
+test("generic webhook transport receives the pinned address and rejects non-2xx", async () => {
+  let connectedAddress = null;
+  const lookup = async () => [{ address: "93.184.216.34", family: 4 }];
+  await sendGeneric({ enabled: true, url: "https://hooks.example.com/path", headers: {} }, "hello", {
+    lookup,
+    transport: async (validated) => {
+      connectedAddress = validated.address;
+      return { ok: true, status: 200, text: async () => "" };
+    },
+  });
+  assert.equal(connectedAddress, "93.184.216.34", "transport uses the validated address without a second lookup");
+
+  await assert.rejects(
+    sendGeneric({ enabled: true, url: "https://hooks.example.com/path", headers: {} }, "hello", {
+      lookup,
+      transport: async () => ({ ok: false, status: 500, text: async () => "failed" }),
+    }),
+    (error) => error?.code === "WEBHOOK_HTTP_ERROR",
+  );
+});
+
 test("alert message contains action and CMB estimated price", () => {
   const message = buildAlertMessage({
     action: "buy_setup",
@@ -1283,7 +1479,7 @@ test("alert message contains action and CMB estimated price", () => {
   assert.equal(message.action, "buy_setup");
 });
 
-test("alert message uses live CMB sell price after fee for sell actions", () => {
+test("alert message shows the executable CMB sell quote without disguising fees as price", () => {
   const config = normalizeConfig({ cmb: { buySpreadPerGram: 2.84, sellSpreadPerGram: 0 } });
   const message = buildAlertMessage({
     action: "sell_take_profit",
@@ -1292,8 +1488,8 @@ test("alert message uses live CMB sell price after fee for sell actions", () => 
     targetPrice: 960,
     suggestedOrder: { instrument: "Au99.99", signalPrice: 952.4, cmbEstimatedPrice: 952.4, grams: 15 },
   }, config, "zh");
-  assert.match(message.body, /947\.4/);
-  assert.doesNotMatch(message.body, /招行估算 952\.4/);
+  assert.match(message.body, /952\.4/);
+  assert.doesNotMatch(message.body, /947\.4/);
 });
 
 test("alert message does not subtract fee when live CMB price is used", () => {
@@ -1701,7 +1897,7 @@ test("opting in restores the pre-close full-close nudge", () => {
   const config = normalizeConfig({
     position: { grams: 10, avgCostPerGram: 945 },
     limits: { maxGrams: 100 },
-    strategy: { confirmBars: 1, signalCooldownMinutes: 0, closeBySessionEnd: true },
+    strategy: { confirmBars: 1, signalCooldownMinutes: 0, closeBySessionEnd: true, maxLossPerGram: 100 },
   });
   const plan = computePlan(nearCloseRuntime(now), config, now);
   assert.equal(plan.action, "close_by_session_end");

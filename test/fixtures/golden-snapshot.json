@@ -2,7 +2,7 @@
   "ok": true,
   "replay": {
     "asOf": "2026-03-13T03:30:00.000Z",
-    "calculationVersion": "goldboard-indicators-v2",
+    "calculationVersion": "goldboard-indicators-v3",
     "deterministic": true
   },
   "snapshot": {
@@ -33,6 +33,7 @@
         "market": "sge",
         "currency": "CNY",
         "unit": "gram",
+        "sourceTimestamp": "2026-03-13T03:30:00.000Z",
         "receivedAt": "2026-03-13T03:30:00.000Z",
         "staleAfterMs": 900000,
         "quality": "primary",
@@ -75,16 +76,17 @@
         "market": "forex",
         "currency": "CNY",
         "unit": "rate",
+        "sourceTimestamp": "2026-03-13T03:29:58.000Z",
         "receivedAt": "2026-03-13T03:30:00.000Z",
         "staleAfterMs": 900000,
         "quality": "primary",
         "stale": false
       },
       "CMB": {
-        "price": 957.85,
-        "buyPrice": 957.85,
+        "price": 963.42,
+        "buyPrice": 963.42,
         "sellPrice": 958.42,
-        "average": 958.14,
+        "average": 960.92,
         "source": "cmb",
         "instrument": "CMB_ACCUMULATED_GOLD",
         "market": "bank",
@@ -93,9 +95,9 @@
         "receivedAt": "2026-03-13T03:30:00.000Z",
         "staleAfterMs": 900000,
         "quality": "primary",
-        "customerBuy": 957.85,
+        "customerBuy": 963.42,
         "customerSell": 958.42,
-        "spread": -0.57,
+        "spread": 5,
         "stale": false,
         "effectiveExitPrice": 958.42
       }
@@ -107,17 +109,25 @@
       "domesticPremiumRatio": 0.001173,
       "domesticPremiumPct": 0.12,
       "cmb": {
-        "buyPrice": 957.85,
+        "buyPrice": 963.42,
         "sellPrice": 958.42,
-        "customerBuy": 957.85,
+        "customerBuy": 963.42,
         "customerSell": 958.42,
-        "spread": -0.57,
-        "effectiveExitPrice": 958.42,
-        "average": 958.14,
-        "sellPriceAfterFee": 958.42,
+        "spread": 5,
+        "effectiveExitPrice": 953.22,
+        "average": 960.92,
+        "sellPriceAfterFee": 953.22,
         "live": true,
+        "synthetic": false,
+        "quality": "primary",
+        "executionVersion": "goldboard-execution-v1",
+        "costComponents": {
+          "explicitFeePerGram": 5,
+          "slippagePerGram": 0.2,
+          "quotedSpreadPerGram": 5
+        },
         "spreadSource": "live",
-        "sourceNote": "招行接口实时价"
+        "sourceNote": "cmb-live-bid-ask"
       },
       "premium": {
         "today": 1.12,
@@ -135,12 +145,13 @@
         "synthetic_bars",
         "premium_history_accumulating"
       ],
-      "calculationVersion": "goldboard-indicators-v2",
+      "calculationVersion": "goldboard-indicators-v3",
       "quote": {
         "stale": false,
         "ageMs": 0,
         "sourceAgeMs": null,
         "sourceDelayMs": null,
+        "futureSkewMs": null,
         "source": "cmb",
         "instrument": "CMB_ACCUMULATED_GOLD",
         "market": "bank",
@@ -157,6 +168,17 @@
         10,
         30,
         60
+      ],
+      "dependencies": [
+        {
+          "id": "CMB",
+          "stale": false,
+          "future": false,
+          "ageMs": 0,
+          "sourceAgeMs": null,
+          "futureSkewMs": null,
+          "source": "cmb"
+        }
       ],
       "warmupReady": false,
       "planWarmupReady": true,
@@ -2297,7 +2319,7 @@
       ]
     },
     "indicators": {
-      "calculationVersion": "goldboard-indicators-v2",
+      "calculationVersion": "goldboard-indicators-v3",
       "methods": {
         "ema": "sma-seeded exponential moving average",
         "rsi": "Wilder smoothing",
@@ -2311,7 +2333,7 @@
       "currency": "CNY",
       "unit": "gram",
       "ind5": {
-        "calculationVersion": "goldboard-indicators-v2",
+        "calculationVersion": "goldboard-indicators-v3",
         "methods": {
           "ema": "sma-seeded exponential moving average",
           "rsi": "Wilder smoothing",
@@ -2350,7 +2372,7 @@
         "recentLow": 954.14
       },
       "ind10": {
-        "calculationVersion": "goldboard-indicators-v2",
+        "calculationVersion": "goldboard-indicators-v3",
         "methods": {
           "ema": "sma-seeded exponential moving average",
           "rsi": "Wilder smoothing",
@@ -2389,7 +2411,7 @@
         "recentLow": 944.94
       },
       "ind30": {
-        "calculationVersion": "goldboard-indicators-v2",
+        "calculationVersion": "goldboard-indicators-v3",
         "methods": {
           "ema": "sma-seeded exponential moving average",
           "rsi": "Wilder smoothing",
@@ -2428,7 +2450,7 @@
         "recentLow": 943.42
       },
       "ind60": {
-        "calculationVersion": "goldboard-indicators-v2",
+        "calculationVersion": "goldboard-indicators-v3",
         "methods": {
           "ema": "sma-seeded exponential moving average",
           "rsi": "Wilder smoothing",
@@ -2471,9 +2493,22 @@
     "position": {
       "grams": 12.34,
       "avgCostPerGram": 951.2,
+      "effectiveEntryPrice": 951.4,
       "cmbNow": 958.42,
-      "feeAdjustedPnl": 89.09,
-      "exitNeeded": 956.48,
+      "effectiveExitPrice": 953.22,
+      "feeAdjustedPnl": 22.45,
+      "profitPerGram": 1.82,
+      "exitNeeded": 956.6,
+      "valuationAvailable": true,
+      "valuationReasonCode": null,
+      "synthetic": false,
+      "costs": {
+        "explicitFeePerGram": 5,
+        "slippagePerGram": 0.2,
+        "quotedSpreadPerGram": 5,
+        "entryExplicitFeePerGram": 0,
+        "entrySlippagePerGram": 0.2
+      },
       "lots": [
         {
           "id": "lot-1",
@@ -2481,8 +2516,11 @@
           "price": 950.4,
           "time": "2026-03-11T01:30:00.000Z",
           "cmbNow": 958.42,
-          "feeAdjustedPnl": 49.48,
-          "profitPerGram": 8.02
+          "effectiveExitPrice": 953.22,
+          "feeAdjustedPnl": 16.17,
+          "profitPerGram": 2.62,
+          "valuationAvailable": true,
+          "valuationReasonCode": null
         },
         {
           "id": "lot-2",
@@ -2490,20 +2528,41 @@
           "price": 952,
           "time": "2026-03-12T03:00:00.000Z",
           "cmbNow": 958.42,
-          "feeAdjustedPnl": 39.61,
-          "profitPerGram": 6.42
+          "effectiveExitPrice": 953.22,
+          "feeAdjustedPnl": 6.3,
+          "profitPerGram": 1.02,
+          "valuationAvailable": true,
+          "valuationReasonCode": null
         }
       ]
     },
     "plan": {
-      "action": "wait",
+      "action": "sell_take_profit",
       "instrument": "CMB",
       "signalLane": "CMB",
-      "signalPrice": 957.85,
+      "signalPrice": 963.42,
       "cmbEstimatedPrice": 958.42,
       "cmbLive": true,
+      "execution": {
+        "available": true,
+        "bid": 958.42,
+        "ask": 963.42,
+        "spreadPerGram": 5,
+        "synthetic": false,
+        "realBidAsk": true,
+        "quality": "primary",
+        "source": "cmb",
+        "asOf": "2026-03-13T03:30:00.000Z",
+        "components": {
+          "pricing": "live-bid-ask",
+          "quotedSpreadPerGram": 5,
+          "estimatedSpreadAppliedPerGram": 0
+        },
+        "executionVersion": "goldboard-execution-v1"
+      },
       "reasonCodes": [
-        "trend_filter_not_met"
+        "target_reached",
+        "target_band_reduce"
       ],
       "dataCoverage": {
         "5": 1,
@@ -2519,12 +2578,13 @@
           "longest_indicator_warmup",
           "synthetic_bars"
         ],
-        "calculationVersion": "goldboard-indicators-v2",
+        "calculationVersion": "goldboard-indicators-v3",
         "quote": {
           "stale": false,
           "ageMs": 0,
           "sourceAgeMs": null,
           "sourceDelayMs": null,
+          "futureSkewMs": null,
           "source": "cmb",
           "instrument": "CMB_ACCUMULATED_GOLD",
           "market": "bank",
@@ -2542,6 +2602,17 @@
           30,
           60
         ],
+        "dependencies": [
+          {
+            "id": "CMB",
+            "stale": false,
+            "future": false,
+            "ageMs": 0,
+            "sourceAgeMs": null,
+            "futureSkewMs": null,
+            "source": "cmb"
+          }
+        ],
         "warmupReady": false,
         "planWarmupReady": true,
         "syntheticBars": true,
@@ -2558,12 +2629,29 @@
           "ok": true
         }
       },
-      "confidenceScore": 5,
+      "ruleScore": 3,
+      "ruleScoreMax": 8,
+      "confidenceScore": 3,
       "confidenceMax": 8,
-      "breakeven": 956.48,
-      "targetPrice": 959.66,
-      "stopPrice": 949.2,
-      "suggestedOrder": null
+      "breakeven": 956.6,
+      "targetPrice": 957.6,
+      "stopPrice": 954.6,
+      "suggestedOrder": {
+        "action": "sell_take_profit",
+        "instrument": "CMB",
+        "side": "sell",
+        "signalPrice": 963.42,
+        "cmbEstimatedPrice": 958.42,
+        "cmbLive": true,
+        "price": 958.42,
+        "grams": 2.34,
+        "validUntil": "2026-03-13T17:50:00.000Z",
+        "reasonCodes": [
+          "target_reached",
+          "target_band_reduce"
+        ],
+        "riskNote": "技术面参考，非投资建议"
+      }
     },
     "pendingOrder": null
   }

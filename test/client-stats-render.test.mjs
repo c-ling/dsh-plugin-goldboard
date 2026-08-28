@@ -1,14 +1,12 @@
 /**
- * 策略统计 render-model smoke test (v1.10.0).
+ * Replay diagnostics render-model smoke test (v1.11.0 / report v5).
  *
  * Executes the real client bundle's SettingsSection component against hook
  * stubs and asserts the new two-layer stats layout renders:
- *   - merged "overall" cards (v3 reports carry report.overall);
- *   - replay-parameter snapshot line;
- *   - grouped entry/exit tables;
- *   - graceful degradation for legacy v2 persisted reports (no overall /
- *     params.strategy): cards fall back to per-action averages, snapshot line
- *     hidden, groups still render.
+ *   - v5 execution banner, diagnostics and continuous-account cards;
+ *   - replay-parameter snapshot line and grouped diagnostic tables;
+ *   - explicit legacy treatment for persisted v4 reports, with no v5 account
+ *     cards or execution-quality tables inferred from their old shape.
  *
  * No DOM: el() records element descriptors, so only the component body runs —
  * exactly the code paths this test owns.
@@ -193,42 +191,51 @@ function fixtureReport(version) {
       exitEvents: 1,
     };
   }
+  if (version === 5) {
+    base.executionVersion = "goldboard-execution-v1";
+    base.fillPolicy = "next-bar-limit";
+    base.ambiguityPolicy = "conservative-stop";
+    base.completeDays = 8;
+    base.partialDays = 0;
+    base.fillRate = 0.5;
+    base.expiryRate = 0.25;
+    base.ambiguousBarCount = 2;
+    base.realBidAskCoverage = 0;
+    base.caveats = [
+      "lane-cmb-persisted-bars",
+      "next-bar-limit-fills",
+      "conservative-ambiguous-bars",
+      "complete-session-only",
+    ];
+  }
   return base;
 }
 
-test("stats panel renders the continuous zero-position view for v4 reports", () => {
-  const tree = renderStats({ ok: true, cached: false, report: fixtureReport(4) });
+test("stats panel renders v5 execution diagnostics and continuous-account cards", () => {
+  const tree = renderStats({ ok: true, cached: false, report: fixtureReport(5) });
   const strings = collectStrings(tree);
-  // Continuous account cards present with their independently explained values.
+  assert.ok(strings.includes("statsV5Banner"), "v5 simulation banner");
+  assert.ok(strings.includes("statsFillRate"), "fill-rate diagnostic");
+  assert.ok(strings.includes("statsExpiryRate"), "expiry diagnostic");
+  assert.ok(strings.includes("statsAmbiguousBars"), "ambiguity diagnostic");
+  assert.ok(strings.includes("statsBidAskCoverage"), "bid/ask coverage diagnostic");
   assert.ok(strings.includes("statsOverallTitle"), "continuous-account section title");
   assert.ok(strings.includes("+160.00"), `total net card value, signed numbers seen: ${strings.filter((s) => /^[+-]\d/.test(s)).join("|")}`);
   assert.ok(strings.includes("statsCardRealizedNet"), "realized P&L card");
-  assert.ok(strings.includes("statsCardUnrealizedNet"), "ending holding P&L card");
-  assert.ok(strings.includes("statsCardEndingPosition"), "ending position card");
-  assert.ok(strings.includes("statsDetails"), "total net card exposes the operation details action");
-  assert.ok(strings.includes("5.00"), "ending position value");
-  // Parameter snapshot line reflects the strategy values used.
-  assert.ok(strings.includes("statsParamsTitle"), "params snapshot label");
-  assert.ok(strings.includes("cb2"), "confirmBars chip interpolated");
-  assert.ok(strings.includes("statsParamCloseOff"), "closeBySessionEnd=off chip");
-  // Grouped tables render with their own headers.
-  assert.ok(strings.includes("statsGroupEntryTitle"), "entry group");
-  assert.ok(strings.includes("statsGroupExitTitle"), "exit group");
-  assert.ok(strings.includes("statsTableHoldNet"), "hold-to-end column (entry family)");
-  assert.ok(strings.includes("statsTableExitSaving"), "exit-vs-holding column (sell family)");
-  // Header tooltips carry the explanation copy.
+  assert.ok(strings.includes("statsDetails"), "details action");
+  assert.ok(strings.includes("statsParamsTitle") && strings.includes("cb2"), "parameter snapshot");
+  assert.ok(strings.includes("statsGroupEntryTitle") && strings.includes("statsGroupExitTitle"), "v5 diagnostic groups");
   const tips = strings.filter((text) => text.startsWith("title:statsTip"));
-  assert.ok(tips.includes("title:statsTipHoldNet"), `hold-net tooltip, tips seen: ${tips.join("|")}`);
-  assert.ok(tips.includes("title:statsTipExitSaving"), "exit-saving tooltip present");
+  assert.ok(tips.includes("title:statsTipHoldNet"));
+  assert.ok(tips.includes("title:statsTipExitSaving"));
 });
 
-test("stats panel degrades gracefully for legacy v2 reports (no overall/params)", () => {
-  const tree = renderStats({ ok: true, cached: true, report: fixtureReport(2) });
+test("stats panel treats persisted v4 reports as legacy diagnostics", () => {
+  const tree = renderStats({ ok: true, cached: true, report: fixtureReport(4) });
   const strings = collectStrings(tree);
-  // Older independent-event reports retain their quality tables, but must not
-  // be mislabeled as a continuous zero-position account.
-  assert.ok(!strings.includes("statsOverallTitle"), "legacy total is not shown as continuous account P&L");
-  assert.ok(strings.includes("statsGroupEntryTitle") && strings.includes("statsGroupExitTitle"), "groups render");
-  // No parameter snapshot line without params.strategy.
-  assert.ok(!strings.includes("statsParamsTitle"), "params snapshot hidden for v2 reports");
+  assert.ok(strings.includes("statsLegacyReport"), "legacy execution warning");
+  assert.ok(!strings.includes("statsV5Banner"), "no v5 label on old data");
+  assert.ok(!strings.includes("statsOverallTitle"), "legacy account output is not promoted as v5 P&L");
+  assert.ok(!strings.includes("statsGroupEntryTitle") && !strings.includes("statsGroupExitTitle"), "old touch metrics are not promoted as v5 diagnostics");
+  assert.ok(strings.includes("statsParamsTitle"), "legacy parameter snapshot remains readable");
 });
