@@ -10,26 +10,27 @@ DeepSeek Harness 黄金实时看板插件：右上角可拖拽浮窗（可收起
 > 本插件只提供技术面参考，不自动下单，不构成投资建议。
 >
 > v1.11.0 执行、估值与回放 v5 的完成项/延期项见 [策略优化说明](docs/v1.11.0-strategy-optimization.md)。
+> v1.12.0 在策略统计明细中保留达到仓位上限等原因导致的未执行信号，并支持跨重启查看。
 
 ## 安装
 
 从 GitHub 安装到 web profile（需要 `pnpm` 在 `PATH` 上；没有则用下面的 corepack 方式）：
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.11.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
 ```
 
 或使用已有的 `dsh` 命令：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.11.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
 ```
 
 pnpm 不在 `PATH` 上时：
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.11.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
 ```
 
 > `dsh plugin` 把参数原样转发给 pnpm，直接从本仓库拉取包（pnpm 9+，本机需装有 `git`）。
@@ -71,12 +72,12 @@ curl -s 'http://127.0.0.1:3080/dsh-plugin-goldboard/analysis-logs?limit=30'
 ## 更新
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.11.0"
-# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.11.0"
-# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.11.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
+# 或：npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
+# 或：cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
 ```
 
-用新的 `#v1.11.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
+用新的 `#v1.12.0` 重新执行安装命令即可升级依赖；`cordis.patch.yml` 中的 loader 行保持不变。
 重启 `dsh web`，然后硬刷新。
 
 ## 卸载
@@ -107,7 +108,7 @@ corepack pnpm remove dsh-plugin-goldboard
 - 技术口径审计：报价带 `sourceTimestamp/receivedAt` 与品种、市场、货币、单位、质量元数据；compact 北京时间、epoch 秒/毫秒和 ISO 时间统一规范化，未来时间戳会阻断策略。10/30 分钟线按自然时间桶重采样，缺子 K 的 partial 桶不进入正式指标；XAU 现货与 `GC=F` 期货严格分开。信号分阈值 schema/UI 上限与真实最大值 8 一致。
 - 模型分析（手动触发）：从 Harness 当前可用的 provider/model 目录选择模型和 reasoning effort，不改变当前会话模型；模型只解释宿主指标和规则 plan，不能补造价格或生成买卖指令。即使数据质量门控未通过也可手动调用，模型需以数据不足/过期/无效等状态说明限制。设置页的「模型与分析」区域提供目录选择、「立即分析」和独立「查询日志」面板。
 - 分析查询日志：每次真实模型调用生成 `queryId`，记录 started/finished 生命周期、模型、行情快照、质量状态、输入 hash、结构化结果、usage 和错误；日志写入 `$DSH_HOME/storages/dsh-plugin-goldboard/analysis-log.jsonl`，支持脱敏详情、筛选、游标分页和孤儿 running 查询恢复。
-- 回放诊断（v1.11.0 / report v5）：默认只选已到配置收盘时点且数据到达时段尾部的完整交易日。策略在信号 K 收盘后只创建限价 pending order，最早从下一根完整 5 分钟 K 线判断 ask/bid 是否触及；未触及或超过 `validUntil` 记为 expired，不成交。同一 K 同触目标和止损时标记 `ambiguousBar`，默认按多头止损先到的保守路径，并报告最佳/最差区间。报告新增订单数、成交率、过期率、平均延迟、双触及数、真实 bid/ask 覆盖率、成本拆分、权益曲线和最大回撤；订单、fills 和兼容 trade 明细一并持久化。独立信号表也先走同一 next-bar fill/expiry 判断，未成交建议只计决策/过期数，不进入目标、回本或时段净结果。v4 报告的版本、窗口、参数和 caveat 继续只读显示，但旧绩效表/账户卡会被抑制并标记为旧执行口径，不与 v5 比较。所有数字仍是 5 分钟数据上的模拟诊断，不是实际成交或样本外业绩证据。
+- 回放诊断（v1.12.0，基于 v1.11.0 / report v5）：默认只选已到配置收盘时点且数据到达时段尾部的完整交易日。策略在信号 K 收盘后只创建限价 pending order，最早从下一根完整 5 分钟 K 线判断 ask/bid 是否触及；未触及或超过 `validUntil` 记为 expired，不成交。同一 K 同触目标和止损时标记 `ambiguousBar`，默认按多头止损先到的保守路径，并报告最佳/最差区间。报告新增订单数、成交率、过期率、平均延迟、双触及数、真实 bid/ask 覆盖率、成本拆分、权益曲线和最大回撤；订单、fills 和兼容 trade 明细一并持久化。策略条件已确认但因连续账户达到最大克数而没有创建订单时，会另存为“未执行策略信号”，显示信号时间、价格、当时仓位/上限和原因，且不计入成交率、现金流或收益。独立信号表也先走同一 next-bar fill/expiry 判断，未成交建议只计决策/过期数，不进入目标、回本或时段净结果。v4 报告的版本、窗口、参数和 caveat 继续只读显示，但旧绩效表/账户卡会被抑制并标记为旧执行口径，不与 v5 比较。所有数字仍是 5 分钟数据上的模拟诊断，不是实际成交或样本外业绩证据。
 
 ## 数据源
 

@@ -755,6 +755,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.ok(Array.isArray(fetched.body.trades), "detail response includes simulated fills as trade-compatible rows");
   assert.ok(Array.isArray(fetched.body.orders), "detail response includes order lifecycle rows");
   assert.ok(Array.isArray(fetched.body.fills), "detail response includes v5 fills");
+  assert.ok(Array.isArray(fetched.body.unexecutedSignals), "detail response includes unexecuted strategy signals");
 
   // Report persisted next to state.json.
   const persisted = JSON.parse(await readFile(join(h.dir, "replay-stats.json"), "utf8"));
@@ -762,6 +763,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.ok(Array.isArray(persisted.trades), "continuous fill-compatible details persist");
   assert.ok(Array.isArray(persisted.orders));
   assert.ok(Array.isArray(persisted.fills));
+  assert.ok(Array.isArray(persisted.unexecutedSignals));
 });
 
 test("integration: mid-window source failure surfaces as a partial report on the route", async (t) => {

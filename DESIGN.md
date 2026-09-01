@@ -393,7 +393,7 @@ pnl = sellProceeds - buyCost
 - **统计宇宙**：`lane:"cmb"` 默认使用本机持久化 CMB 序列，`lane:"au9999"` 使用东财历史。新 CMB bar 有真实 ask/bid OHLC 时直接使用；旧单边 bar 只可按固定 5 元/克差生成 proxy bid，`realBidAskCoverage` 不计为真实。
 - **完整时段**：默认枚举最近 N 个已过配置收盘时点的交易日；数据没有到达配置时段尾部则标记 partial 并排除。只有显式 `includePartial:true` 才按截至时点单列，不进入 `sessionEnd*` 指标。
 - **决策与订单**：信号在已收盘 K 线结束时产生 pending limit order，`eligibleAt = signalAt + 5m`。最早从下一根完整 5 分钟 K 线判断：买单 ask low ≤ limit、卖单 bid high ≥ limit 才模拟成交；未触及或超过 `validUntil` 记 expired。没有 5 分钟内部分成交/队列假设。
-- **资金约束**：连续账户从 0 克开始，pending 买单会占用剩余克数预算；同向替代建议先把旧单记为 replaced，避免并发挂单超配。
+- **资金约束**：连续账户从 0 克开始，pending 买单会占用剩余克数预算；同向替代建议先把旧单记为 replaced，避免并发挂单超配。策略条件通过确认/冷却、但账户已达到 `maxGrams` 时记录 `unexecutedSignals[]`（`status:not_executed`、`reasonCode:position_limit`、与正常补仓共用计算的 `signalPrice/limitPrice`），不创建订单，也不进入成交率、现金流或盈亏。
 - **OHLC 歧义**：同一 bar 同触 target/stop 时 `firstTouch:"ambiguous"`，默认 `conservativeTouch:"stop"`，并输出 `bestCaseNet/worstCaseNet/ambiguityImpactCny`。回本只在 executable/proxy bid high ≥ breakeven 时命中；要求真实双边但缺失时为 unknown。
 - **统一账本**：fill、已实现盈亏、期末估值和成本拆分调用 `ExecutionModel`；report 新增订单/成交/过期数、成交率、平均延迟、真实双边覆盖率、equity curve、最大回撤、turnover、profit factor 与费用/滑点拆分。
 - **独立信号诊断**：空仓/持仓双 pass 仍用于 `perAction` 和规则分箱，但每个 decision 也必须先通过同一 next-bar limit fill/expiry；未成交 decision 保留 `fillStatus`，不产生 target/breakeven/MFE/MAE/session-net outcome，且不与顶部连续账户相加。
@@ -414,7 +414,7 @@ pnl = sellProceeds - buyCost
 | `complete-session-only` | 默认只统计数据尾部完整的已结束时段 |
 | `past-performance-advisory` | 工程诊断不是未来表现或样本外证据 |
 
-**工程约束**：单飞行去重；客户端断开按交易日边界取消；逐日让出事件循环；中途源失败产出部分报告。`replay-stats.json` 持久化 report、orders、fills、pendingOrders 与 trade-compatible 明细；`detail=true` 返回相同生命周期数据，events 仍截断最近 200 条。
+**工程约束**：单飞行去重；客户端断开按交易日边界取消；逐日让出事件循环；中途源失败产出部分报告。`replay-stats.json` 持久化 report、orders、fills、pendingOrders、trade-compatible 明细与最近 200 条 `unexecutedSignals`；report 摘要保留窗口内未执行信号总数。`detail=true` 返回相同生命周期数据，独立 events 仍截断最近 200 条。
 
 ---
 
@@ -565,7 +565,7 @@ pnl = sellProceeds - buyCost
 
 - `days` 夹取 [1,30]；`lane` 为 `cmb|au9999`；默认仅完整时段。
 - `includePartial:true` 显式包含当前/尾部不完整时段并按 as-of 标记；`requireExecutableBid:true` 在缺真实 bid path 时把 touch 指标设 unknown。
-- `detail=true` 返回截断 events 以及完整 `orders/fills/pendingOrders/trades`；GET 从内存或落盘读取，v4 文件保持原样可读。
+- `detail=true` 返回截断 events、完整 `orders/fills/pendingOrders/trades` 和最近 200 条 `unexecutedSignals`；GET 从内存或落盘读取，v4 文件保持原样可读。
 - 单飞行、1 小时配置感知缓存、断连取消和部分失败信封保持不变。
 
 核心 report 字段：
@@ -580,6 +580,7 @@ pnl = sellProceeds - buyCost
   "completeDays": 8,
   "partialDays": 0,
   "excludedDays": 1,
+  "totals": { "steps": 4080, "directionalEvents": 84, "unexecutedSignals": 8, "blockedSteps": 12 },
   "orders": { "placed": 20, "filled": 9, "expired": 7, "pending": 0, "replaced": 4, "ambiguous": 2 },
   "fillRate": 0.45,
   "expiryRate": 0.35,
@@ -630,7 +631,7 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
-- **回放诊断卡片（v1.11.0 / report v5）**：提供天数选择和生成按钮；顶部先显示 v5 模拟成交警告、完整/部分时段、fill/expiry rate、双触及数和真实 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数及订单状态明细。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
+- **回放诊断卡片（v1.11.0 / report v5）**：提供天数选择和生成按钮；顶部先显示 v5 模拟成交警告、完整/部分时段、fill/expiry rate、账户约束未执行数、双触及数和真实 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数。明细弹窗将模拟订单和 `unexecutedSignals` 分表显示，后者明确列出信号时点、价格、当时仓位/上限与原因。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
 - **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
   `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
   - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像

@@ -758,6 +758,22 @@ test("plan engine suggests add position when holding and setup aligns", () => {
   // 补仓只是建议：在用户实际更新持仓前，回本价/目标价继续按当前持仓配置展示
   assert.equal(plan.breakeven, plan.position.exitNeeded);
   assert.ok(plan.targetPrice > plan.breakeven);
+
+  const fullConfig = normalizeConfig({
+    position: { lots: [{ id: "a", grams: 10, price: 945 }] },
+    limits: { maxGrams: 10 },
+    strategy: { minProfitPerGram: 10 },
+  });
+  const liveAtLimit = computePlan({ ...runtime }, fullConfig, new Date("2026-08-14T02:00:00Z"));
+  assert.equal(liveAtLimit.action, "wait", "live plan keeps its non-directional shape at the position limit");
+  assert.equal(liveAtLimit.unexecutedSignal, undefined, "live plan does not expose replay-only diagnostics");
+  assert.ok(liveAtLimit.reasonCodes.includes("position_limit"));
+
+  const replayAtLimit = computePlan({ ...runtime, captureUnexecutedSignals: true }, fullConfig, new Date("2026-08-14T02:00:00Z"));
+  assert.equal(replayAtLimit.action, "wait");
+  assert.equal(replayAtLimit.unexecutedSignal.reasonCode, "position_limit");
+  assert.equal(replayAtLimit.unexecutedSignal.limitPrice, plan.suggestedOrder.price, "blocked signal reuses the normal suggested limit calculation");
+  assert.notEqual(replayAtLimit.unexecutedSignal.limitPrice, replayAtLimit.signalPrice, "suggested limit is not mislabeled as the current lane price");
 });
 
 test("plan engine suggests reduce position on overbought weakness", () => {

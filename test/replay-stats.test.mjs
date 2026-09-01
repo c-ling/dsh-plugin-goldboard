@@ -537,6 +537,97 @@ test("continuous replay keeps fills within inventory and order validity across d
   assert.equal(state.pendingOrders.length, 0, "complete sessions expire all remaining orders");
 });
 
+test("continuous replay records confirmed position-limit signals without creating orders", () => {
+  const bars5 = buildBars(TWO_DAYS);
+  const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
+  const state = {};
+  const config = {
+    limits: { maxGrams: 10 },
+    strategy: {
+      confirmBars: 2,
+      signalCooldownMinutes: 15,
+      closeBySessionEnd: false,
+      maxLossPerGram: 1000,
+      minProfitPerGram: 1000,
+      rsiOverbought: 99,
+      weaknessRsi: 99,
+    },
+  };
+  for (const day of TWO_DAYS) replayContinuousTradingDay(day, bars5, bars60, config, state, { lane: "au9999" });
+
+  assert.ok(state.unexecutedSignals.length > 0, "confirmed signals remain visible after the account reaches its limit");
+  assert.equal(state.unexecutedSignals[0].signalAt, "2026-08-14T17:10:00.000Z", "confirmBars=2 does not record the preceding candidate bar");
+  for (const signal of state.unexecutedSignals) {
+    assert.equal(signal.status, "not_executed");
+    assert.equal(signal.reasonCode, "position_limit");
+    assert.equal(signal.action, "add_position");
+    assert.equal(signal.positionBeforeGrams, 10);
+    assert.equal(signal.maxGrams, 10);
+    assert.equal(signal.availableGrams, 0);
+    assert.ok(Number.isFinite(signal.signalPrice) && Number.isFinite(signal.limitPrice));
+    assert.notEqual(signal.limitPrice, signal.signalPrice, "diagnostic preserves the strategy limit separately from the current lane price");
+    assert.ok(!state.orders.some((order) => order.signalAt === signal.signalAt), "blocked signal never becomes an order");
+  }
+  for (let index = 1; index < state.unexecutedSignals.length; index += 1) {
+    assert.ok(
+      Date.parse(state.unexecutedSignals[index].signalAt) - Date.parse(state.unexecutedSignals[index - 1].signalAt) >= 15 * 60_000,
+      "same-side cooldown still applies to blocked signals",
+    );
+  }
+
+  const report = aggregateReplayReport({
+    events: [],
+    continuous: state,
+    steps: 1,
+    blockedSteps: 0,
+    daysRequested: 2,
+    daysEvaluated: 2,
+    daysFailed: 0,
+    params: config,
+    generatedAt: FRIDAY_AFTER_CLOSE.getTime(),
+    window: { from: TWO_DAYS[0], to: TWO_DAYS[1] },
+  });
+  assert.equal(report.totals.unexecutedSignals, state.unexecutedSignals.length);
+  assert.equal(report.orders.placed, state.orders.length + state.pendingOrders.length, "blocked signals do not inflate placed-order counts");
+});
+
+test("unexecuted signal details cap at 200 while the report keeps the full count", () => {
+  const days = ["2026-08-12", "2026-08-13", "2026-08-14"];
+  const bars5 = buildBars(days);
+  const bars60 = buildBars(days, { strideMinutes: 60 });
+  const state = {};
+  const config = {
+    limits: { maxGrams: 10 },
+    strategy: {
+      confirmBars: 1,
+      signalCooldownMinutes: 0,
+      closeBySessionEnd: false,
+      maxLossPerGram: 1000,
+      minProfitPerGram: 1000,
+      rsiOverbought: 99,
+      weaknessRsi: 99,
+    },
+  };
+  for (const day of days) replayContinuousTradingDay(day, bars5, bars60, config, state, { lane: "au9999" });
+  assert.equal(state.unexecutedSignals.length, 200);
+  assert.ok(state.executionDiagnostics.unexecutedSignals > state.unexecutedSignals.length);
+
+  const report = aggregateReplayReport({
+    events: [],
+    continuous: state,
+    steps: 1,
+    blockedSteps: 0,
+    daysRequested: days.length,
+    daysEvaluated: days.length,
+    daysFailed: 0,
+    params: config,
+    generatedAt: FRIDAY_AFTER_CLOSE.getTime(),
+    window: { from: days[0], to: days.at(-1) },
+  });
+  assert.equal(report.totals.unexecutedSignals, state.executionDiagnostics.unexecutedSignals);
+  assert.ok(report.totals.unexecutedSignals > state.unexecutedSignals.length);
+});
+
 test("session-end forced close is disabled by default (no intraday-close bias)", () => {
   const bars5 = buildBars(TWO_DAYS);
   const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
@@ -736,11 +827,22 @@ test("engine: abort stops the run between days and the engine can run again", as
 test("engine: report persists to replay-stats.json and last() reads it back idempotently", async () => {
   const h = await createTempEngineHarness();
   try {
+    h.liveConfig.limits = { maxGrams: 10 };
+    h.liveConfig.strategy = {
+      confirmBars: 2,
+      signalCooldownMinutes: 15,
+      closeBySessionEnd: false,
+      maxLossPerGram: 1000,
+      minProfitPerGram: 1000,
+      rsiOverbought: 99,
+      weaknessRsi: 99,
+    };
     await h.engine.run({ days: 2, lane: "au9999", now: FRIDAY_AFTER_CLOSE });
     const saved = JSON.parse(await readFile(h.file, "utf8"));
     assert.equal(saved.report.version, REPLAY_STATS_VERSION);
     assert.equal(saved.report.params.days, 2);
     assert.ok(Array.isArray(saved.trades), "continuous trade details persist with the report");
+    assert.ok(saved.unexecutedSignals.length > 0, "position-limit signals persist with the report");
 
     const fromMemory = await h.engine.last();
     const fromDisk = await (() => {
@@ -764,6 +866,7 @@ test("engine: report persists to replay-stats.json and last() reads it back idem
       return cold.last(true);
     })();
     assert.deepEqual(detailFromDisk.trades, saved.trades, "persisted reports retain continuous trade details");
+    assert.deepEqual(detailFromDisk.unexecutedSignals, saved.unexecutedSignals, "cold reports retain unexecuted strategy signals");
     // Repeated reads are idempotent.
     const again = await (() => {
       const cold = createReplayStats({

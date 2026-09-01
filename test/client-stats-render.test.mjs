@@ -21,17 +21,18 @@ import { normalizeConfig } from "../lib/config.js";
 const CLIENT_SOURCE = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
 
 /** useState call order inside SettingsSection — seed by index. */
-const STATE = { DATA: 0, DRAFT: 1, STATS_RESULT: 20 };
+const STATE = { DATA: 0, DRAFT: 1, STATS_RESULT: 20, STATS_DETAILS_OPEN: 22 };
 
 function reactStubWith(seeds) {
   let index = 0;
+  let activeSeeds = seeds;
   return {
     createElement(type, props, ...children) { return { type, props, children }; },
     memo: (fn) => fn,
     useState(initial) {
       const i = index++;
-      if (Object.prototype.hasOwnProperty.call(seeds, i)) {
-        const value = seeds[i];
+      if (Object.prototype.hasOwnProperty.call(activeSeeds, i)) {
+        const value = activeSeeds[i];
         return [typeof value === "function" ? value() : value, () => {}];
       }
       return [typeof initial === "function" ? initial() : initial, () => {}];
@@ -41,6 +42,7 @@ function reactStubWith(seeds) {
     useMemo: (fn) => fn(),
     useRef: (value) => ({ current: value }),
     useSyncExternalStore: () => null,
+    reset(nextSeeds = {}) { index = 0; activeSeeds = nextSeeds; },
   };
 }
 
@@ -85,7 +87,7 @@ function loadSettingsSection() {
   }, slotsKey: () => slotsStub };
 }
 
-function renderStats(reportFixture) {
+function renderStats(reportFixture, options = {}) {
   let captured;
   {
     // Capture the bundle spec (same recipe as host.test.mjs).
@@ -113,6 +115,7 @@ function renderStats(reportFixture) {
   const reactHooks = reactStubWith({
     [STATE.DRAFT]: normalizeConfig({}),
     [STATE.STATS_RESULT]: reportFixture,
+    [STATE.STATS_DETAILS_OPEN]: options.details ? true : false,
   });
   const clientExports = captured.factory((id) => {
     if (id === "react") return reactHooks;
@@ -127,12 +130,27 @@ function renderStats(reportFixture) {
     effect(fn) { fn(); return () => {}; },
   });
   assert.ok(settingsSection, "SettingsSection component is registered");
-  const tree = settingsSection({ t: (key, params) => {
+  const translate = (key, params) => {
     if (key === "statsParamConfirmBars") return `cb${params.n}`;
+    if (key === "statsUnexecutedReason_position_limit") return "reason-position-limit";
     return key;
-  } });
+  };
+  const tree = settingsSection({ t: translate });
   assert.ok(tree, "component rendered a tree");
-  return tree;
+  if (!options.details) return tree;
+
+  const dialogNode = findNodes(tree, (node) => typeof node.type === "function" && node.type.name === "ReplayStatsDetailsDialog")[0];
+  assert.ok(dialogNode, "ReplayStatsDetailsDialog is mounted");
+  reactHooks.reset({
+    0: options.details.orders ?? [],
+    1: Object.prototype.hasOwnProperty.call(options.details, "unexecutedSignals") ? options.details.unexecutedSignals : null,
+    2: reportFixture.report?.overall ?? null,
+    3: "",
+    4: false,
+  });
+  const dialogTree = dialogNode.type({ ...dialogNode.props, t: translate });
+  assert.ok(dialogTree, "details dialog rendered a tree");
+  return dialogTree;
 }
 
 function collectStrings(node, out = []) {
@@ -201,6 +219,7 @@ function fixtureReport(version) {
     base.expiryRate = 0.25;
     base.ambiguousBarCount = 2;
     base.realBidAskCoverage = 0;
+    base.totals.unexecutedSignals = 2;
     base.caveats = [
       "lane-cmb-persisted-bars",
       "next-bar-limit-fills",
@@ -219,6 +238,7 @@ test("stats panel renders v5 execution diagnostics and continuous-account cards"
   assert.ok(strings.includes("statsExpiryRate"), "expiry diagnostic");
   assert.ok(strings.includes("statsAmbiguousBars"), "ambiguity diagnostic");
   assert.ok(strings.includes("statsBidAskCoverage"), "bid/ask coverage diagnostic");
+  assert.ok(strings.includes("statsUnexecutedCount"), "unexecuted account-signal count");
   assert.ok(strings.includes("statsOverallTitle"), "continuous-account section title");
   assert.ok(strings.includes("+160.00"), `total net card value, signed numbers seen: ${strings.filter((s) => /^[+-]\d/.test(s)).join("|")}`);
   assert.ok(strings.includes("statsCardRealizedNet"), "realized P&L card");
@@ -228,6 +248,56 @@ test("stats panel renders v5 execution diagnostics and continuous-account cards"
   const tips = strings.filter((text) => text.startsWith("title:statsTip"));
   assert.ok(tips.includes("title:statsTipHoldNet"));
   assert.ok(tips.includes("title:statsTipExitSaving"));
+});
+
+test("stats details render account orders and position-limit signals separately", () => {
+  const tree = renderStats({ ok: true, cached: false, report: fixtureReport(5) }, {
+    details: {
+      orders: [{
+        orderId: "replay-order-1",
+        signalAt: "2026-08-28T09:10:00.000Z",
+        fillAt: "2026-08-28T09:15:00.000Z",
+        status: "filled",
+        action: "add_position",
+        fillPrice: 996.43,
+        grams: 10,
+        positionBeforeGrams: 90,
+        positionAfterGrams: 100,
+      }],
+      unexecutedSignals: [{
+        signalAt: "2026-08-28T09:30:00.000Z",
+        status: "not_executed",
+        action: "add_position",
+        signalPrice: 996.49,
+        limitPrice: 995.88,
+        positionBeforeGrams: 100,
+        maxGrams: 100,
+        reasonCode: "position_limit",
+      }],
+    },
+  });
+  const strings = collectStrings(tree);
+  assert.ok(strings.includes("statsOrdersTitle"), "simulated orders remain in their own table");
+  assert.ok(strings.includes("statsUnexecutedTitle"), "unexecuted signals get a dedicated table");
+  assert.ok(strings.includes("statsSignalNotExecuted"), "signal is explicitly not executed");
+  assert.ok(strings.includes("reason-position-limit"), "position-limit reason is visible");
+  assert.ok(strings.includes("100.00 / 100.00"), "position and configured limit are shown together");
+  assert.ok(strings.includes("995.88"), "the suggested limit remains visible without a fill");
+  assert.ok(!strings.includes("996.49"), "the current signal-lane price is not mislabeled as the limit");
+});
+
+test("stats details tell old v5 reports to regenerate when blocked-signal data is absent", () => {
+  const report = fixtureReport(5);
+  delete report.totals.unexecutedSignals;
+  const panelStrings = collectStrings(renderStats({ ok: true, cached: true, report }));
+  assert.ok(panelStrings.includes("statsUnexecutedCountUnavailable"), "old reports do not claim zero blocked signals");
+
+  const tree = renderStats({ ok: true, cached: true, report }, {
+    details: { orders: [] },
+  });
+  const strings = collectStrings(tree);
+  assert.ok(strings.includes("statsUnexecutedUnavailable"));
+  assert.ok(!strings.includes("statsUnexecutedTitle"), "missing data is not presented as an empty signal set");
 });
 
 test("stats panel treats persisted v4 reports as legacy diagnostics", () => {
