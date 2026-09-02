@@ -10,7 +10,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -18,9 +18,15 @@ import test from "node:test";
 import {
   REPLAY_AMBIGUITY_POLICY,
   REPLAY_CACHE_TTL_MS,
+  REPLAY_CALENDAR_VERSION,
+  REPLAY_DATA_SCHEMA_VERSION,
   REPLAY_DAYS_MAX,
+  REPLAY_EVIDENCE_STATUSES,
   REPLAY_FILL_POLICY,
   REPLAY_STATS_VERSION,
+  REPLAY_STRATEGY_ID,
+  REPLAY_STRATEGY_VERSION,
+  REPLAY_VALIDATION_REQUIREMENTS,
   aggregateReplayReport,
   applyReplayFill,
   computeForwardOutcome,
@@ -437,9 +443,35 @@ test("aggregateReplayReport produces exact per-action counts, rates and buckets"
   assert.equal(bucket7.events, 2);
   assert.equal(bucket7.targetHitRate, 0);
   assert.equal(report.version, REPLAY_STATS_VERSION);
-  assert.equal(report.fillPolicy, REPLAY_FILL_POLICY);
-  assert.equal(report.ambiguityPolicy, REPLAY_AMBIGUITY_POLICY);
-  assert.equal(report.caveats.length, 9);
+  assert.equal(report.strategyId, REPLAY_STRATEGY_ID);
+  assert.equal(report.strategyVersion, REPLAY_STRATEGY_VERSION);
+  assert.equal(report.calculationVersion, "goldboard-indicators-v3");
+  assert.equal(report.dataSchemaVersion, REPLAY_DATA_SCHEMA_VERSION);
+  assert.equal(report.executionVersion, "goldboard-execution-v1");
+  assert.equal(report.calendarVersion, REPLAY_CALENDAR_VERSION);
+  assert.equal(report.evidenceStatus, REPLAY_EVIDENCE_STATUSES.EXPLORATORY);
+  assert.equal(report.validationGate.eligible, false);
+  assert.ok(report.validationGate.unmet.includes("no_oos_validation"));
+  assert.equal(report.validationGate.requirements.minimumHistoryMonths, REPLAY_VALIDATION_REQUIREMENTS.minimumHistoryMonths);
+  assert.equal(report.validationGate.requirements.targetHistoryMonths, 24);
+  assert.deepEqual(report.validationGate.requirements.walkForward, { trainMonths: 6, testMonths: 1, rolling: "monthly", parametersFrozen: true });
+  assert.equal(report.costAssumptions.explicitFeePerGram.buy, 0);
+  assert.equal(report.costAssumptions.explicitFeePerGram.sell, 5);
+  assert.equal(report.costAssumptions.slippagePerGram.buy, 0.2);
+  assert.equal(report.costAssumptions.historicalCmbProxySpreadPerGram, 5);
+  assert.equal(report.costAssumptions.realBidAskQuotedSpreadIncluded, true);
+  assert.deepEqual(report.executionCoverage, {
+    denominator: "continuous-replay-bars",
+    bars: 0,
+    realBidAskBars: 0,
+    proxyBars: 0,
+    unknownBars: 0,
+    realBidAskCoverage: null,
+    proxyBidAskCoverage: null,
+    unknownBidAskCoverage: null,
+  });
+  assert.equal(report.caveats.length, 10);
+  assert.ok(report.caveats.includes("two-simulated-passes"));
   assert.deepEqual(report.failures, []);
 
   // Independent signal samples remain available for diagnostics only; they no
@@ -475,6 +507,54 @@ test("aggregateReplayReport: empty event list yields a zero-valued continuous ac
   assert.equal(report.overall.totalNetCny, 0);
   assert.equal(report.overall.avgNetPerGram, null);
   assert.equal(report.overall.winRate, null);
+});
+
+test("aggregateReplayReport classifies execution evidence and never promotes partial data", () => {
+  const report = aggregateReplayReport({
+    events: [],
+    continuous: {
+      executionDiagnostics: { bars: 10, realBidAskBars: 4, syntheticBars: 5 },
+      portfolio: { grams: 0, costBasisCny: 0, cashFlowCny: 0, realizedPnlCny: 0 },
+      trades: [],
+    },
+    steps: 10,
+    blockedSteps: 2,
+    daysRequested: 2,
+    daysEvaluated: 1,
+    daysFailed: 0,
+    daysSkippedNoData: 0,
+    completeDays: 0,
+    partialDays: 1,
+    excludedDays: 1,
+    params: {
+      lane: "au9999",
+      fee: { buyPerGram: 1, sellPerGram: 3 },
+      cmb: { buySpreadPerGram: 2, sellSpreadPerGram: 1 },
+      strategy: { estimatedSpreadPerGram: 0.75, slippagePerGram: 0.4 },
+    },
+    generatedAt: Date.parse("2026-08-14T04:00:00Z"),
+    window: { from: "2026-08-13", to: "2026-08-14" },
+  });
+  assert.equal(report.lane, "au9999");
+  assert.equal(report.evidenceStatus, "exploratory");
+  assert.equal(report.validationGate.eligible, false);
+  assert.ok(report.validationGate.unmet.includes("proxy_or_unknown_execution"));
+  assert.ok(report.validationGate.unmet.includes("incomplete_sessions"));
+  assert.deepEqual(report.executionCoverage, {
+    denominator: "continuous-replay-bars",
+    bars: 10,
+    realBidAskBars: 4,
+    proxyBars: 5,
+    unknownBars: 1,
+    realBidAskCoverage: 0.4,
+    proxyBidAskCoverage: 0.5,
+    unknownBidAskCoverage: 0.1,
+  });
+  assert.deepEqual(report.costAssumptions.explicitFeePerGram, { buy: 1, sell: 3 });
+  assert.deepEqual(report.costAssumptions.slippagePerGram, { buy: 0.4, sell: 0.4 });
+  assert.deepEqual(report.costAssumptions.configuredFallbackOffsetPerGram, { buy: 2, sell: 1 });
+  assert.equal(report.costAssumptions.estimatedSpreadPerGram, 0.75);
+  assert.equal(report.costAssumptions.historicalCmbProxySpreadPerGram, null);
 });
 
 test("replayTradingDay is deterministic: identical fixtures produce identical reports", () => {
@@ -884,6 +964,37 @@ test("engine: report persists to replay-stats.json and last() reads it back idem
     await new Promise((resolve) => setImmediate(resolve));
   } finally {
     await h.cleanup();
+  }
+});
+
+test("engine: legacy reports remain byte-for-byte read-only", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "goldboard-replaystats-legacy-"));
+  const file = join(dir, "replay-stats.json");
+  const legacy = {
+    report: {
+      version: 4,
+      generatedAt: "2026-08-14T04:00:00.000Z",
+      params: { days: 2, lane: "au9999" },
+      window: { from: "2026-08-13", to: "2026-08-14" },
+      caveats: ["legacy-execution"],
+      overall: { totalNetCny: 12.34 },
+    },
+    trades: [{ t: "2026-08-14T04:00:00.000Z", price: 950 }],
+    customLegacyField: { preserved: true },
+  };
+  try {
+    const serialized = JSON.stringify(legacy);
+    await writeFile(file, serialized, "utf8");
+    const engine = createReplayStats({ getConfig: () => ({}), fetchKlines: async () => [], file });
+    const result = await engine.last(true);
+    assert.deepEqual(result.report, legacy.report);
+    assert.deepEqual(result.trades, legacy.trades);
+    assert.equal(result.customLegacyField, undefined, "only documented report/detail fields are projected");
+    const again = await engine.last(true);
+    assert.deepEqual(again, result);
+    assert.equal(await readFile(file, "utf8"), serialized, "legacy file is not migrated or rewritten");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

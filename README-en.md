@@ -11,26 +11,27 @@ A real-time gold dashboard plugin for DeepSeek Harness: a draggable top-right fl
 >
 > See the [v1.11.0 strategy optimization notes](docs/v1.11.0-strategy-optimization.md) for the execution/valuation/replay-v5 scope and deferred work.
 > v1.12.0 keeps confirmed signals blocked by position limits visible in replay details and preserves them across restarts.
+> v1.13.0 completes Stage 0 evidence and semantics freezing. Replay reports are explicitly labeled as exploratory diagnostics: 5-minute simulation, real/proxy/unknown bid-ask coverage, complete/partial sessions, cost assumptions, and the control strategy version are included in every new report. No report is a validated strategy result or actual performance record.
 
 ## Install
 
 Install into the web profile from GitHub (requires `pnpm` on `PATH`; otherwise use the corepack fallback below):
 
 ```sh
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.13.0"
 ```
 
 Or with an existing `dsh` binary:
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.13.0"
 ```
 
 When `pnpm` is not on `PATH`:
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.13.0"
 ```
 
 > `dsh plugin` forwards its arguments to pnpm and fetches the package from this repo (pnpm 9+, `git` required). The warning `declares no dsh.bundle — installed as a plain dependency` is expected: this plugin is not a profile bundle layer; it is activated by the loader row below.
@@ -57,7 +58,7 @@ It should print a factory bundle starting with `window.__ModuleLoader__.load({`.
 curl -s http://127.0.0.1:3080/dsh-plugin-goldboard/snapshot
 ```
 
-It should return `{ ok: true, quotes: { AU9999, XAU, USDCNY, CMB }, quality: …, plan: … }`; when present, `quotes.GCF` is a separately identified COMEX futures diagnostic quote.
+It should return `{ ok: true, quotes: { AU9999, XAU, USDCNY, CMB }, quality: …, plan: … }`; when present, `quotes.GCF` is a separately identified COMEX futures diagnostic quote. New `/replay-stats` reports also include `strategyVersion`, `calculationVersion`, `dataSchemaVersion`, `executionVersion`, `calendarVersion`, `evidenceStatus: "exploratory"`, `costAssumptions`, and real/proxy/unknown `executionCoverage`.
 
 ```sh
 curl -s http://127.0.0.1:3080/dsh-plugin-goldboard/models
@@ -69,12 +70,12 @@ The model catalog comes from currently registered Harness providers. Log queries
 ## Update
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
-# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
-# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.12.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.13.0"
+# or: npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.13.0"
+# or: cd ~/.dsh/profiles/web && corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.13.0"
 ```
 
-Re-running the install command with the new `#v1.12.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
+Re-running the install command with the new `#v1.13.0` pin upgrades the dependency; the loader row in `cordis.patch.yml` stays unchanged. Restart `dsh web`, then hard-refresh.
 
 ## Uninstall
 
@@ -104,7 +105,7 @@ This plugin keeps state under `$DSH_HOME/storages/dsh-plugin-goldboard/`, which 
 - Auditable market semantics: quotes expose `sourceTimestamp/receivedAt` plus instrument, market, currency, unit, and quality metadata. Compact Beijing timestamps, epoch seconds/milliseconds, and ISO timestamps normalize consistently; future timestamps block strategy output. 10m/30m bars use natural clock buckets, and partial buckets with missing children cannot enter formal indicators. XAU spot and `GC=F` futures remain separate. The score-threshold schema/UI maximum now matches the real maximum of 8.
 - Manual model analysis: choose a provider, model and reasoning effort from the current Harness catalog without changing the active conversation model. The model explains host-computed indicators and the rule plan only; it cannot invent prices or issue trading instructions. When data-quality gates fail, manual analysis can still be invoked and the model must report the data limitations. Settings → Gold Board adds model selection, Analyze now and a separate Query logs panel.
 - Query audit logs: every real model call gets a `queryId` and started/finished lifecycle record with model, market snapshot, quality state, input hash, structured result, usage and errors. Logs are stored at `$DSH_HOME/storages/dsh-plugin-goldboard/analysis-log.jsonl`, with redacted details, filters, cursor pagination and orphaned-running recovery.
-- Replay diagnostics (v1.12.0, building on v1.11.0 / report v5): complete sessions are selected by default. A signal close creates a pending limit order; ask/bid touch is evaluated no earlier than the next complete 5-minute bar, and an untouched order expires at `validUntil`. A bar touching both target and stop is marked `ambiguousBar`; the default long-side result assumes the stop first and reports best/worst bounds. Reports add order counts, fill/expiry rates, average delay, ambiguity count, real bid/ask coverage, cost breakdown, equity curve, and maximum drawdown. Orders, fills, and trade-compatible details persist together. When a confirmed strategy signal cannot create an order because the continuous account has reached its maximum grams, it is persisted separately as an unexecuted signal with its time, price, position/limit, and reason; it does not count toward fill rate, cash flow, or P&L. Independent signal tables also run the same next-bar fill/expiry check: unfilled suggestions count only as decisions/expiries and cannot enter target, breakeven, or session-net outcomes. v4 version/window/parameters/caveats remain readable, while old performance tables and account cards are suppressed behind an explicit legacy-execution warning and never compared to v5. These are still 5-minute simulation diagnostics, not actual fills or out-of-sample performance evidence.
+- Replay diagnostics (v1.13.0, building on v1.11.0 / report v5): complete sessions are selected by default. A signal close creates a pending limit order; ask/bid touch is evaluated no earlier than the next complete 5-minute bar, and an untouched order expires at `validUntil`. A bar touching both target and stop is marked `ambiguousBar`; the default long-side result assumes the stop first and reports best/worst bounds. Reports add order counts, fill/expiry rates, average delay, ambiguity count, real/proxy/unknown bid/ask coverage, cost assumptions and cost breakdown, equity curve, and maximum drawdown, while freezing the `control` strategy, indicator, data-contract, execution-ledger, configured-session, and report versions. Each new report carries `evidenceStatus: "exploratory"` plus the admission requirements for long-term history, OOS, real bid/ask evidence, verified cost semantics, benchmarks, and uncertainty intervals; it is not called a validation result until those requirements are met. Orders, fills, and trade-compatible details persist together. When a confirmed strategy signal cannot create an order because the continuous account has reached its maximum grams, it is persisted separately as an unexecuted signal with its time, price, position/limit, and reason; it does not count toward fill rate, cash flow, or P&L. Independent signal tables also run the same next-bar fill/expiry check: unfilled suggestions count only as decisions/expiries and cannot enter target, breakeven, or session-net outcomes. v4 and pre-baseline v5 reports remain read-only with their existing version/window/parameters/caveats; they are not backfilled, recomputed, or compared with the new semantics. These are still exploratory 5-minute simulation diagnostics, not actual fills or out-of-sample performance evidence.
 
 ## Data sources
 

@@ -1,6 +1,7 @@
-# dsh-plugin-goldboard — 设计文档（v1.11.0 当前实现）
+# dsh-plugin-goldboard — 设计文档（v1.13.0 当前实现）
 
-> 状态：本文描述当前代码口径。v1.11.0 完成统一执行账本、独立持仓估值、双边历史增量采集与 replay report v5；长期样本外验证、风险预算和真实成交回填仍未实现。
+> 状态：本文描述 v1.13.0 当前代码口径。v1.11.0 的统一执行账本、独立持仓估值、双边历史增量采集与 replay report v5，以及 v1.12.0 的仓位上限未执行信号，在本版本继续有效；v1.13.0 完成阶段 0 证据与口径冻结。长期样本外验证、风险预算和真实成交回填仍未实现。
+> 证据定位：当前 replay report 明确是探索性诊断，不是实际成交或已验证策略的业绩证明。
 > 目标环境：DeepSeek Harness Web GUI，本地 `link:` 安装到 `web` profile。
 > 插件形态：双面 Cordis 包（Node 宿主半 + 手写 factory-CJS 浏览器半），无构建步骤。
 
@@ -386,7 +387,7 @@ pnl = sellProceeds - buyCost
 - 除常规买卖信号外，还额外跟踪最近一次委托建议；按 §7.4 的 v1.9.0 生命周期语义，仅在冲突/漂移/实质更新时以 `cancel_order` / `order_updated` 边沿提醒，观望与数据缺口保持静默监控。
 - **连续确认与冷却语义**：`strategy.confirmBars = N` 表示方向条件需在连续 N 根已收盘 5 分钟 bar 上成立；同一 bar 的重复轮询不重复计数。动作离开方向集、信号道切换、休市或仓位变化会清空 streak。v1.11.0 起仓位变化不再清空 `lastSide/lastAt`，同一 setup 成交后仍受同向冷却约束。
 
-### 7.6 回放诊断口径与局限（v1.11.0，report v5）
+### 7.6 回放诊断口径与局限（v1.13.0，report v5）
 
 只读分析功能，不发提醒、不调模型、不修改真实持仓。v5 把策略决策与订单成交分开：
 
@@ -412,9 +413,32 @@ pnl = sellProceeds - buyCost
 | `next-bar-limit-fills` | 下一根 K 才可成交，未触及/过期不成交 |
 | `conservative-ambiguous-bars` | 同 K 双触及默认保守止损路径 |
 | `complete-session-only` | 默认只统计数据尾部完整的已结束时段 |
+| `two-simulated-passes` | 独立信号表的空仓/持仓诊断不属于连续账户 |
 | `past-performance-advisory` | 工程诊断不是未来表现或样本外证据 |
 
 **工程约束**：单飞行去重；客户端断开按交易日边界取消；逐日让出事件循环；中途源失败产出部分报告。`replay-stats.json` 持久化 report、orders、fills、pendingOrders、trade-compatible 明细与最近 200 条 `unexecutedSignals`；report 摘要保留窗口内未执行信号总数。`detail=true` 返回相同生命周期数据，独立 events 仍截断最近 200 条。
+
+### 7.7 阶段 0 baseline 与证据状态
+
+阶段 0 只冻结口径，不把当前短窗口 replay 提升为业绩验证。新生成 report 的 provenance 字段如下：
+
+| 字段 | 当前值 / 语义 |
+| --- | --- |
+| `version` | `5`，replay wire schema 版本 |
+| `strategyId` / `strategyVersion` | `control` / `goldboard-control-v1`，当前趋势回调规则身份 |
+| `calculationVersion` | `goldboard-indicators-v3`，指标算法版本 |
+| `dataSchemaVersion` | `goldboard-market-data-v1`，当前规范化行情输入契约；不同于 `BARS_SEED_VERSION` |
+| `executionVersion` | `goldboard-execution-v1`，唯一执行账本版本 |
+| `calendarVersion` | `goldboard-configured-session-v1`，当前可配置 session 规则，不是任一品种的官方日历 |
+| `evidenceStatus` | 当前固定为 `exploratory`（探索性诊断）；`validated` 只能由未来独立验证流程显式产生 |
+
+`validationGate` 保存机器可读的 `eligible`、`unmet` 和门槛快照。晋级为 `validated` 至少需要 12 个月历史（目标 24 个月）、6 个月训练/1 个月测试的按月滚动 OOS、测试参数冻结、多折 OOS、真实双边证据、已核实的产品费用语义、基准比较和不确定性区间。当前 replay 只有短窗口诊断，因此 `eligible:false`，不能由成交率、净结果、命中率或回撤推导验证结论。
+
+`costAssumptions` 与 `executionCoverage` 是报告级事实说明：前者列出报价外显式费用、滑点、fallback/proxy spread 及其来源和未核实标记；后者分别列出 real bid/ask、proxy 和 unknown 的 bar 数及比例。真实 bid/ask 的报价内点差不再重复加估算 spread。无样本或旧报告缺字段时显示 unknown，不补当前默认值。
+
+阶段 0 的兼容规则是 additive：v4 和阶段 0 之前生成的 v5 文件经 `GET /replay-stats` 原样只读返回，不迁移、不补字段、不重算；客户端只显示它们已有的安全元数据和 legacy/不可用提示，不把缺失字段补成阶段 0 基线，也不把结果提升为真实业绩。`past-performance-advisory` 与 `two-simulated-passes` caveat 必须随新 report 保留。
+
+**阶段 0 文档/前端口径差异清单**：历史 v4/v5 文件没有新增 provenance 时只显示旧执行/元数据不可用；新 v5 report 显示完整 provenance、探索性状态、成本假设和 real/proxy/unknown 覆盖；README 与设置页均将这些数值称为 5 分钟模拟诊断，而不是实际业绩；v1.11.0 说明页保留历史实现并链接当前基线。
 
 ---
 
@@ -548,7 +572,7 @@ pnl = sellProceeds - buyCost
 
 - 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用）。通用 Webhook 统一经过 Host outbound 校验：无凭据 HTTPS、公网 DNS/IP、header allowlist、禁止 redirect；loopback/RFC1918/link-local/metadata 目标返回 `WEBHOOK_URL_BLOCKED`。
 
-### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.11.0，report v5）
+### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.13.0，report v5）
 
 `POST` 请求体：
 
@@ -573,10 +597,37 @@ pnl = sellProceeds - buyCost
 ```json
 {
   "version": 5,
+  "strategyId": "control",
+  "strategyVersion": "goldboard-control-v1",
   "calculationVersion": "goldboard-indicators-v3",
+  "dataSchemaVersion": "goldboard-market-data-v1",
   "executionVersion": "goldboard-execution-v1",
+  "calendarVersion": "goldboard-configured-session-v1",
+  "evidenceStatus": "exploratory",
+  "validationGate": { "eligible": false, "unmet": ["no_oos_validation", "cost_semantics_unverified"] },
+  "generatedAt": "2026-08-14T04:00:00.000Z",
+  "window": { "from": "2026-08-03", "to": "2026-08-14" },
+  "lane": "cmb",
   "fillPolicy": "next-bar-limit",
   "ambiguityPolicy": "conservative-stop",
+  "costAssumptions": {
+    "explicitFeePerGram": { "buy": 0, "sell": 5 },
+    "slippagePerGram": { "buy": 0.2, "sell": 0.2 },
+    "configuredFallbackOffsetPerGram": { "buy": 1.72, "sell": 1.72 },
+    "estimatedSpreadPerGram": 0.2,
+    "historicalCmbProxySpreadPerGram": 5,
+    "productAgreementVerified": false,
+    "realBidAskQuotedSpreadIncluded": true
+  },
+  "executionCoverage": {
+    "bars": 100,
+    "realBidAskBars": 18,
+    "proxyBars": 80,
+    "unknownBars": 2,
+    "realBidAskCoverage": 0.18,
+    "proxyBidAskCoverage": 0.8,
+    "unknownBidAskCoverage": 0.02
+  },
   "completeDays": 8,
   "partialDays": 0,
   "excludedDays": 1,
@@ -597,7 +648,7 @@ pnl = sellProceeds - buyCost
 }
 ```
 
-UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行诊断；旧报告显示 legacy 警告。
+UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行诊断；新 report 同时显示 `evidenceStatus`、生成时间、provenance、成本假设和 real/proxy/unknown 覆盖。旧报告或缺失元数据的 report 显示 legacy/不可用提示，不推断当前口径。
 
 ---
 
@@ -631,7 +682,7 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
-- **回放诊断卡片（v1.11.0 / report v5）**：提供天数选择和生成按钮；顶部先显示 v5 模拟成交警告、完整/部分时段、fill/expiry rate、账户约束未执行数、双触及数和真实 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数。明细弹窗将模拟订单和 `unexecutedSignals` 分表显示，后者明确列出信号时点、价格、当时仓位/上限与原因。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
+- **回放诊断卡片（v1.13.0 / report v5）**：提供天数选择和生成按钮；顶部先显示探索性诊断状态、生成时间、control 与 provenance 版本、5 分钟模拟成交警告、完整/部分时段、fill/expiry rate、账户约束未执行数、双触及数和真实/代理/未知 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数。成本假设（显式费用、滑点、fallback/proxy spread 和未核实的产品费用语义）单独展示。明细弹窗将模拟订单和 `unexecutedSignals` 分表显示，后者明确列出信号时点、价格、当时仓位/上限与原因。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
 - **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
   `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
   - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像

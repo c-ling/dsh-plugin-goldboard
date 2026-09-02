@@ -727,8 +727,24 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   const report = started.body.report;
   assert.equal(report.version, 5);
   assert.match(report.reportId, /^replay-/);
+  assert.match(report.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(report.strategyId, "control");
+  assert.equal(report.strategyVersion, "goldboard-control-v1");
+  assert.equal(report.calculationVersion, "goldboard-indicators-v3");
+  assert.equal(report.dataSchemaVersion, "goldboard-market-data-v1");
+  assert.equal(report.executionVersion, "goldboard-execution-v1");
+  assert.equal(report.calendarVersion, "goldboard-configured-session-v1");
+  assert.equal(report.evidenceStatus, "exploratory");
+  assert.equal(report.validationGate.eligible, false);
+  assert.ok(report.validationGate.unmet.includes("no_oos_validation"));
+  assert.equal(report.lane, "au9999");
   assert.equal(report.fillPolicy, "next-bar-limit");
   assert.equal(report.ambiguityPolicy, "conservative-stop");
+  assert.equal(report.costAssumptions.explicitFeePerGram.buy, 0);
+  assert.equal(report.costAssumptions.explicitFeePerGram.sell, 5);
+  assert.equal(report.costAssumptions.productAgreementVerified, false);
+  assert.ok(report.executionCoverage && typeof report.executionCoverage === "object");
+  assert.ok(report.caveats.includes("two-simulated-passes"));
   assert.equal(report.params.days, 2);
   assert.equal(report.params.lane, "au9999");
   assert.equal(report.daysRequested, 2);
@@ -784,6 +800,8 @@ test("integration: mid-window source failure surfaces as a partial report on the
   assert.equal(result.body.report.daysEvaluated, 1);
   assert.equal(result.body.report.daysFailed, 1);
   assert.deepEqual(result.body.report.failures, [{ day: "2026-08-13", error: "day-2 source down" }]);
+  assert.equal(result.body.report.evidenceStatus, "exploratory");
+  assert.ok(result.body.report.validationGate.unmet.includes("incomplete_sessions"));
 });
 
 // ── 10. dispose: the final flush is awaited ─────────────────────────────────

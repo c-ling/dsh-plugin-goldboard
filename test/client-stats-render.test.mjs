@@ -210,15 +210,47 @@ function fixtureReport(version) {
     };
   }
   if (version === 5) {
+    base.calculationVersion = "goldboard-indicators-v3";
+    base.strategyId = "control";
+    base.strategyVersion = "goldboard-control-v1";
+    base.dataSchemaVersion = "goldboard-market-data-v1";
+    base.calendarVersion = "goldboard-configured-session-v1";
+    base.lane = "cmb";
     base.executionVersion = "goldboard-execution-v1";
     base.fillPolicy = "next-bar-limit";
     base.ambiguityPolicy = "conservative-stop";
+    base.evidenceStatus = "exploratory";
+    base.validationGate = {
+      status: "not_eligible",
+      eligible: false,
+      unmet: ["long_term_history_not_available", "no_oos_validation", "cost_semantics_unverified"],
+    };
+    base.costAssumptions = {
+      explicitFeePerGram: { buy: 0, sell: 5 },
+      slippagePerGram: { buy: 0.2, sell: 0.2 },
+      configuredFallbackOffsetPerGram: { buy: 1.72, sell: 1.72 },
+      estimatedSpreadPerGram: 0.2,
+      historicalCmbProxySpreadPerGram: 5,
+      productAgreementVerified: false,
+      realBidAskQuotedSpreadIncluded: true,
+    };
+    base.executionCoverage = {
+      denominator: "continuous-replay-bars",
+      bars: 10,
+      realBidAskBars: 2,
+      proxyBars: 7,
+      unknownBars: 1,
+      realBidAskCoverage: 0.2,
+      proxyBidAskCoverage: 0.7,
+      unknownBidAskCoverage: 0.1,
+    };
     base.completeDays = 8;
     base.partialDays = 0;
     base.fillRate = 0.5;
     base.expiryRate = 0.25;
+    base.averageDelayMs = 420000;
     base.ambiguousBarCount = 2;
-    base.realBidAskCoverage = 0;
+    base.realBidAskCoverage = 0.2;
     base.totals.unexecutedSignals = 2;
     base.caveats = [
       "lane-cmb-persisted-bars",
@@ -234,6 +266,17 @@ test("stats panel renders v5 execution diagnostics and continuous-account cards"
   const tree = renderStats({ ok: true, cached: false, report: fixtureReport(5) });
   const strings = collectStrings(tree);
   assert.ok(strings.includes("statsV5Banner"), "v5 simulation banner");
+  assert.ok(strings.includes("statsGeneratedAt"), "report generation time");
+  assert.ok(strings.includes("statsStrategy"), "control strategy identity");
+  assert.ok(strings.includes("statsVersions"), "report provenance versions");
+  assert.ok(strings.includes("statsExecution"), "execution semantics");
+  assert.ok(strings.includes("statsEvidenceExploratory"), "exploratory evidence status");
+  assert.ok(strings.includes("statsValidationNotEligible"), "validation gate warning");
+  assert.ok(strings.includes("statsCostAssumptions"), "cost assumptions");
+  assert.ok(strings.includes("statsCostFees"), "cost fee assumptions");
+  assert.ok(strings.includes("statsCostQuotedSpread"), "real quote spread rule is shown when real bars exist");
+  assert.ok(strings.includes("statsProxyBidAskCoverage"), "proxy coverage");
+  assert.ok(strings.includes("statsAverageDelay"), "average delay");
   assert.ok(strings.includes("statsFillRate"), "fill-rate diagnostic");
   assert.ok(strings.includes("statsExpiryRate"), "expiry diagnostic");
   assert.ok(strings.includes("statsAmbiguousBars"), "ambiguity diagnostic");
@@ -308,4 +351,40 @@ test("stats panel treats persisted v4 reports as legacy diagnostics", () => {
   assert.ok(!strings.includes("statsOverallTitle"), "legacy account output is not promoted as v5 P&L");
   assert.ok(!strings.includes("statsGroupEntryTitle") && !strings.includes("statsGroupExitTitle"), "old touch metrics are not promoted as v5 diagnostics");
   assert.ok(strings.includes("statsParamsTitle"), "legacy parameter snapshot remains readable");
+});
+
+test("stats panel limits the quoted-spread rule to reports with real bid/ask bars", () => {
+  const report = fixtureReport(5);
+  report.executionCoverage.realBidAskBars = 0;
+  report.executionCoverage.proxyBars = 9;
+  report.executionCoverage.realBidAskCoverage = 0;
+  report.executionCoverage.proxyBidAskCoverage = 0.9;
+  const strings = collectStrings(renderStats({ ok: true, cached: true, report }));
+  assert.ok(!strings.includes("statsCostQuotedSpread"));
+  assert.ok(strings.includes("statsCostProxy"));
+});
+
+test("stats panel accepts a validated label only with an explicit eligible gate", () => {
+  const report = fixtureReport(5);
+  report.evidenceStatus = "validated";
+  report.validationGate = { status: "eligible", eligible: true, unmet: [] };
+  const strings = collectStrings(renderStats({ ok: true, cached: true, report }));
+  assert.ok(strings.includes("statsEvidenceValidated"));
+  assert.ok(!strings.includes("statsEvidenceExploratory"));
+  assert.ok(!strings.includes("statsValidationNotEligible"));
+});
+
+test("stats panel does not infer missing stage-zero metadata from an old report", () => {
+  const report = fixtureReport(5);
+  delete report.evidenceStatus;
+  delete report.validationGate;
+  delete report.costAssumptions;
+  delete report.executionCoverage;
+  report.caveats = ["future-caveat"];
+  const strings = collectStrings(renderStats({ ok: true, cached: true, report }));
+  assert.ok(strings.includes("statsEvidenceUnavailable"), "missing evidence status stays unknown");
+  assert.ok(strings.includes("statsCostUnavailable"), "missing costs are not filled from current defaults");
+  assert.ok(strings.includes("statsCoverageUnavailable"), "missing coverage is not treated as zero");
+  assert.ok(strings.includes("statsCaveatUnknown"), "unknown caveat renders safely");
+  assert.ok(!strings.includes("statsEvidenceValidated"), "legacy report is never promoted to validated");
 });
