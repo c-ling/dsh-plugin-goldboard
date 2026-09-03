@@ -47,8 +47,10 @@ import { makeWriteQueue } from "../lib/store.js";
 
 // ── fixture builders ───────────────────────────────────────────────────────
 
-const SESSION_MINUTES = 17 * 60; // 09:00 → next-day 02:00
-const BARS_PER_DAY = SESSION_MINUTES / 5; // 204 closed 5m bars per session
+const CMB_SESSION_MINUTES = 17 * 60; // 09:00 -> next-day 02:00
+const FIXTURE_SESSION_MINUTES = 17.5 * 60; // also reaches the SGE 02:30 night close
+const BARS_PER_DAY = CMB_SESSION_MINUTES / 5; // 204 CMB 5m bars per session
+const SGE_BARS_PER_DAY = (150 + 120 + 390) / 5; // day segments + 20:00-02:30 night session
 
 /** Deterministic price path: gentle rise with a small sine ripple. */
 function priceAt(index) {
@@ -61,7 +63,7 @@ function buildBars(dayList, { strideMinutes = 5 } = {}) {
   let index = 0;
   for (const day of dayList) {
     const startMs = Date.parse(`${day}T09:00:00+08:00`);
-    for (let i = 0; i < SESSION_MINUTES / strideMinutes; i += 1) {
+    for (let i = 0; i < FIXTURE_SESSION_MINUTES / strideMinutes; i += 1) {
       const t = startMs + i * stepMs;
       const base = priceAt(index);
       bars.push({
@@ -133,7 +135,8 @@ test("replay session status uses the configured close instead of the last observ
   const bounds = replaySessionBounds("2026-08-14", {});
   assert.equal(new Date(bounds.closeMs).toISOString(), "2026-08-14T18:00:00.000Z");
   assert.equal(replaySessionStatus("2026-08-14", completeBars, {}, afterClose).status, "complete");
-  assert.equal(replaySessionStatus("2026-08-14", completeBars.slice(0, -2), {}, afterClose).status, "partial");
+  const truncated = completeBars.filter((bar) => bar.t < bounds.closeMs - 5 * 60_000);
+  assert.equal(replaySessionStatus("2026-08-14", truncated, {}, afterClose).status, "partial");
   assert.equal(replaySessionStatus("2026-08-14", completeBars, {}, FRIDAY_NOON).status, "partial");
 });
 
@@ -447,7 +450,7 @@ test("aggregateReplayReport produces exact per-action counts, rates and buckets"
   assert.equal(report.strategyVersion, REPLAY_STRATEGY_VERSION);
   assert.equal(report.calculationVersion, "goldboard-indicators-v3");
   assert.equal(report.dataSchemaVersion, REPLAY_DATA_SCHEMA_VERSION);
-  assert.equal(report.executionVersion, "goldboard-execution-v1");
+  assert.equal(report.executionVersion, "goldboard-execution-v2");
   assert.equal(report.calendarVersion, REPLAY_CALENDAR_VERSION);
   assert.equal(report.evidenceStatus, REPLAY_EVIDENCE_STATUSES.EXPLORATORY);
   assert.equal(report.validationGate.eligible, false);
@@ -562,9 +565,17 @@ test("replayTradingDay is deterministic: identical fixtures produce identical re
   const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
   // v1.9.0: the forced session-end close is gated by strategy.closeBySessionEnd
   // (default off) — enable it here so this fixture keeps covering the mechanism.
-  const config = { strategy: { closeBySessionEnd: true } };
-  const first = replayTradingDay("2026-08-14", bars5, bars60, config);
-  const second = replayTradingDay("2026-08-14", bars5, bars60, config);
+  const config = {
+    strategy: {
+      closeBySessionEnd: true,
+      maxLossPerGram: 1000,
+      minProfitPerGram: 1000,
+      rsiOverbought: 99,
+      weaknessRsi: 99,
+    },
+  };
+  const first = replayTradingDay("2026-08-14", bars5, bars60, config, { lane: "cmb" });
+  const second = replayTradingDay("2026-08-14", bars5, bars60, config, { lane: "cmb" });
   assert.deepEqual(second, first);
   // Structural facts: every in-session 5m bar evaluated once per pass.
   assert.equal(first.steps, BARS_PER_DAY * 2);
@@ -575,7 +586,7 @@ test("replayTradingDay is deterministic: identical fixtures produce identical re
   // (the 26:00 close itself is already market_closed and never nudges).
   const sessionEndSteps = [...Array(BARS_PER_DAY).keys()]
     .filter((i) => {
-      const msToClose = (SESSION_MINUTES - (i + 1) * 5) * 60_000;
+      const msToClose = (CMB_SESSION_MINUTES - (i + 1) * 5) * 60_000;
       return msToClose > 0 && msToClose <= 30 * 60_000;
     }).length;
   assert.equal(byAction.close_by_session_end, sessionEndSteps);
@@ -633,10 +644,11 @@ test("continuous replay records confirmed position-limit signals without creatin
       weaknessRsi: 99,
     },
   };
-  for (const day of TWO_DAYS) replayContinuousTradingDay(day, bars5, bars60, config, state, { lane: "au9999" });
+  for (const day of TWO_DAYS) replayContinuousTradingDay(day, bars5, bars60, config, state, { lane: "cmb" });
 
   assert.ok(state.unexecutedSignals.length > 0, "confirmed signals remain visible after the account reaches its limit");
-  assert.equal(state.unexecutedSignals[0].signalAt, "2026-08-14T17:10:00.000Z", "confirmBars=2 does not record the preceding candidate bar");
+  assert.equal(state.unexecutedSignals[0].signalAt.slice(0, 10), "2026-08-14");
+  assert.equal(Date.parse(state.unexecutedSignals[0].signalAt) % (5 * 60_000), 0, "confirmed signal stays aligned to a closed 5m decision bar");
   for (const signal of state.unexecutedSignals) {
     assert.equal(signal.status, "not_executed");
     assert.equal(signal.reasonCode, "position_limit");
@@ -645,7 +657,7 @@ test("continuous replay records confirmed position-limit signals without creatin
     assert.equal(signal.maxGrams, 10);
     assert.equal(signal.availableGrams, 0);
     assert.ok(Number.isFinite(signal.signalPrice) && Number.isFinite(signal.limitPrice));
-    assert.notEqual(signal.limitPrice, signal.signalPrice, "diagnostic preserves the strategy limit separately from the current lane price");
+    assert.equal(signal.signalLane, "CMB", "diagnostic retains the execution lane even when its limit equals the live ask");
     assert.ok(!state.orders.some((order) => order.signalAt === signal.signalAt), "blocked signal never becomes an order");
   }
   for (let index = 1; index < state.unexecutedSignals.length; index += 1) {
@@ -688,7 +700,7 @@ test("unexecuted signal details cap at 200 while the report keeps the full count
       weaknessRsi: 99,
     },
   };
-  for (const day of days) replayContinuousTradingDay(day, bars5, bars60, config, state, { lane: "au9999" });
+  for (const day of days) replayContinuousTradingDay(day, bars5, bars60, config, state, { lane: "cmb" });
   assert.equal(state.unexecutedSignals.length, 200);
   assert.ok(state.executionDiagnostics.unexecutedSignals > state.unexecutedSignals.length);
 
@@ -711,7 +723,7 @@ test("unexecuted signal details cap at 200 while the report keeps the full count
 test("session-end forced close is disabled by default (no intraday-close bias)", () => {
   const bars5 = buildBars(TWO_DAYS);
   const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
-  const first = replayTradingDay("2026-08-14", bars5, bars60, {});
+  const first = replayTradingDay("2026-08-14", bars5, bars60, {}, { lane: "cmb" });
   assert.equal(first.steps, BARS_PER_DAY * 2);
   const byAction = {};
   for (const event of first.events) byAction[event.action] = (byAction[event.action] ?? 0) + 1;
@@ -871,7 +883,7 @@ test("engine: mid-window source failure yields a partial report with failures", 
     assert.deepEqual(result.report.failures, [{ day: "2026-08-14", error: "source exploded" }]);
     assert.ok(result.report.daysEvaluated + result.report.daysFailed === result.report.daysRequested);
     // Completed days are still aggregated.
-    assert.ok(result.report.totals.steps >= BARS_PER_DAY * 2);
+    assert.ok(result.report.totals.steps >= SGE_BARS_PER_DAY * 2);
   } finally {
     await h.cleanup();
   }
@@ -1058,9 +1070,10 @@ test("replayTradingDay lane=cmb evaluates on the CMB lane with a synthesized spr
   const bars60 = buildBars(TWO_DAYS, { strideMinutes: 60 });
   const cmbDay = replayTradingDay("2026-08-14", bars5, bars60, {}, { lane: "cmb" });
   const auDay = replayTradingDay("2026-08-14", bars5, bars60, {});
-  // Same machinery, same step count — only the signal lane differs.
+  // The machinery is shared, but each lane uses its own calendar facts.
   assert.equal(cmbDay.steps, BARS_PER_DAY * 2);
-  assert.equal(cmbDay.steps, auDay.steps);
+  assert.equal(auDay.steps, SGE_BARS_PER_DAY * 2);
+  assert.notEqual(cmbDay.steps, auDay.steps);
   assert.ok(cmbDay.events.length > 0, "tracked actions still fire on the CMB lane");
   for (const event of cmbDay.events) {
     assert.equal(event.signalLane, "CMB");

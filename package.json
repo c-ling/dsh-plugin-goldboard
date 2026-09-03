@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-goldboard",
-  "version": "1.13.0",
-  "description": "Gold price dashboard and intraday decision support for the DeepSeek Harness web GUI: SGE Au99.99 + XAU spot quotes, a draggable top-right floating board, CMB 积存金 live/international-converted fallback prices, fee-aware buy/sell suggestions, explicitly labeled exploratory replay diagnostics with unexecuted-signal visibility, and host system/webhook alerts.",
+  "version": "1.14.0",
+  "description": "Gold price dashboard and intraday decision support for the DeepSeek Harness web GUI: versioned market-data facts, independent CMB/SGE/XAU calendars, durable CMB bid/ask history, fee-aware suggestions, exploratory replay diagnostics, and host system/webhook alerts.",
   "type": "module",
   "main": "lib/index.js",
   "dependencies": {
@@ -15,6 +15,21 @@
     "./client": {
       "default": "./lib/client.js"
     },
+    "./market-data": {
+      "default": "./lib/market-data.js"
+    },
+    "./execution": {
+      "default": "./lib/execution.js"
+    },
+    "./history": {
+      "default": "./lib/historical-store.js"
+    },
+    "./replay": {
+      "default": "./lib/replay.js"
+    },
+    "./testing": {
+      "default": "./lib/testing.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -22,6 +37,7 @@
     "DESIGN.md",
     "README-en.md",
     "docs/optimization-roadmap.md",
+    "docs/stage-1-implementation-plan.md",
     "docs/v1.11.0-strategy-optimization.md"
   ],
   "dsh": {

@@ -24,7 +24,7 @@ import {
   normalizeConfig,
   resolveSignalLane,
   updatePremiumHistory,
-} from "../lib/index.js";
+} from "../lib/testing.js";
 
 const NOW = Date.parse("2026-08-14T02:00:00Z"); // Beijing Friday 10:00, session open
 const LANE_PRIORITY = ["CMB", "XAU", "AU9999"];
@@ -331,11 +331,20 @@ test("dynamicCmbSpread needs 30 fresh samples and preserves buy/sell offsets", (
     buyOffset: 2.5,
     sellOffset: -2.5,
     spreadMid: 0,
+    sources: { cmb: "cmb", xau: index % 2 ? "tencent" : "sina", usdcny: "tencent" },
   }));
   const sideResult = dynamicCmbSpread(sides, now, { buyOffset: 1.72, sellOffset: 1.72 });
   assert.equal(sideResult.buyOffset, 2.5);
   assert.equal(sideResult.sellOffset, -2.5);
   assert.equal(sideResult.legacy, false);
+  assert.equal(sideResult.calibration.sampleCount, 30);
+  assert.equal(sideResult.calibration.from, new Date(now - 30 * 60_000).toISOString());
+  assert.equal(sideResult.calibration.to, new Date(now - 60_000).toISOString());
+  assert.deepEqual(sideResult.calibration.sources, {
+    cmb: ["cmb"],
+    xau: ["sina", "tencent"],
+    usdcny: ["tencent"],
+  });
 
   const zeroAnchor = dynamicCmbSpread(
     Array.from({ length: 30 }, () => ({ t: now - 60_000, buyOffset: 2.5, sellOffset: -2.5 })),
@@ -386,6 +395,8 @@ test("snapshot reports spreadSource/spreadSampleCount for dynamic and static fal
   assert.equal(staticSnap.derived.cmb.spreadSampleCount, 0);
   assert.equal(staticSnap.derived.cmb.buyPrice, roundPrice(xauCny + 1.72));
   assert.equal(staticSnap.derived.cmb.sourceNote, "cmb-synthetic-bid-ask");
+  assert.equal(staticSnap.derived.cmb.calibration.method, "static-config");
+  assert.equal(staticSnap.derived.cmb.calibration.sampleCount, 0);
 
   const samples = Array.from({ length: 31 }, (_, i) => ({ t: NOW - (i + 1) * 60_000, spreadMid: 1.0 }));
   const dynamicSnap = buildSnapshot(cmbFallbackRuntime(samples), DEFAULT_CONFIG, now);
@@ -393,6 +404,8 @@ test("snapshot reports spreadSource/spreadSampleCount for dynamic and static fal
   assert.equal(dynamicSnap.derived.cmb.spreadSampleCount, 31);
   assert.equal(dynamicSnap.derived.cmb.buyPrice, roundPrice(xauCny + 1.0));
   assert.equal(dynamicSnap.derived.cmb.sourceNote, "cmb-synthetic-bid-ask");
+  assert.equal(dynamicSnap.derived.cmb.calibration.method, "median-legacy-mid-offset");
+  assert.equal(dynamicSnap.derived.cmb.calibration.sampleCount, 31);
 
   const liveRuntime = cmbFallbackRuntime([]);
   liveRuntime.quotes.XAU = null;
@@ -597,7 +610,7 @@ test("laneAvailability mirrors quote validity and lane health", () => {
       AU9999: { price: 951, updatedAt: NOW },
     },
     laneHealth: { CMB: { ok: true } },
-  });
+  }, new Date(NOW));
   assert.equal(healthy.CMB.available, true);
   assert.equal(healthy.XAU.available, true);
   assert.equal(healthy.AU9999.available, true);

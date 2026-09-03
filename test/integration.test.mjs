@@ -9,16 +9,19 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import {
   BARS_SEED_VERSION,
+  CALENDAR_VERSIONS,
+  EXECUTION_MODEL_VERSION,
+  MARKET_DATA_SCHEMA_VERSION,
   __setFetchImpl,
   apply,
-} from "../lib/index.js";
+} from "../lib/testing.js";
 import { buildGoldenConfig, buildGoldenInput } from "../tools/capture-golden-snapshot.mjs";
 
 // ── harness ─────────────────────────────────────────────────────────────────
@@ -280,7 +283,7 @@ test("integration: cold start seeds lanes with true OHLC aggregation and persist
   const state = JSON.parse(await readFile(join(h.dir, "state.json"), "utf8"));
   assert.equal(state.barsSeedVersion, BARS_SEED_VERSION, "seed version round-trips");
   const bars5 = state.bars.AU9999[5];
-  assert.ok(bars5.length >= 20, `5m lane seeded (${bars5.length})`);
+  assert.ok(bars5.length >= 18, `SGE-session 5m lane seeded (${bars5.length})`);
   assert.equal(bars5[0].synthetic, false, "seeded bars are real klines");
   // True OHLC aggregation over the 60m buckets built by aggregateSubBars.
   const bars60 = state.bars.AU9999[60];
@@ -672,7 +675,7 @@ test("integration: POST /replay reproduces the golden snapshot exactly", async (
 
 /** Deterministic klines for the trading days the frozen clock selects. */
 function replayKlineStub(callLog) {
-  const sessionMinutes = 17 * 60;
+  const sessionMinutes = 17.5 * 60;
   const buildBars = (dayList, strideMinutes) => {
     const bars = [];
     let index = 0;
@@ -731,9 +734,9 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(report.strategyId, "control");
   assert.equal(report.strategyVersion, "goldboard-control-v1");
   assert.equal(report.calculationVersion, "goldboard-indicators-v3");
-  assert.equal(report.dataSchemaVersion, "goldboard-market-data-v1");
-  assert.equal(report.executionVersion, "goldboard-execution-v1");
-  assert.equal(report.calendarVersion, "goldboard-configured-session-v1");
+  assert.equal(report.dataSchemaVersion, MARKET_DATA_SCHEMA_VERSION);
+  assert.equal(report.executionVersion, EXECUTION_MODEL_VERSION);
+  assert.equal(report.calendarVersion, CALENDAR_VERSIONS.SGE);
   assert.equal(report.evidenceStatus, "exploratory");
   assert.equal(report.validationGate.eligible, false);
   assert.ok(report.validationGate.unmet.includes("no_oos_validation"));
@@ -752,7 +755,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.deepEqual(report.window, { from: "2026-08-12", to: "2026-08-13" });
   assert.equal(report.completeDays, 2);
   assert.equal(report.partialDays, 0);
-  assert.ok(report.totals.steps >= 2 * 204 * 2 * 0.9, `steps cover both passes (${report.totals.steps})`);
+  assert.ok(report.totals.steps >= 2 * 132 * 2 * 0.9, `steps cover SGE day and night session passes (${report.totals.steps})`);
   assert.ok(Array.isArray(report.perAction));
   assert.equal(report.failures.length, 0);
 
@@ -804,7 +807,44 @@ test("integration: mid-window source failure surfaces as a partial report on the
   assert.ok(result.body.report.validationGate.unmet.includes("incomplete_sessions"));
 });
 
-// ── 10. dispose: the final flush is awaited ─────────────────────────────────
+// ── 10. long-term CMB point-in-time collection ──────────────────────────────
+
+test("integration: a live CMB quote dual-writes state and append-only history", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async (url) => {
+    const target = String(url);
+    if (target.includes("market-center")) {
+      return {
+        ok: true,
+        text: async () => JSON.stringify({ data: [{ zBuyPrc: 955.5, zSelPrc: 950.5 }] }),
+      };
+    }
+    if (target.includes("hq.sinajs.cn/list=gds_AU9999")) {
+      const line = sinaLine("951.50");
+      return { ok: true, arrayBuffer: async () => Buffer.from(line, "utf8"), text: async () => line };
+    }
+    throw new Error("source unavailable in test");
+  });
+  t.after(() => __setFetchImpl(previousFetch));
+
+  const h = await boot({ config: {} });
+  t.after(() => rm(h.dir, { recursive: true, force: true }));
+  await h.dispose();
+  const historyFiles = (await readdir(join(h.dir, "history"))).filter((name) => name.endsWith(".jsonl"));
+  assert.equal(historyFiles.length, 1);
+  const records = (await readFile(join(h.dir, "history", historyFiles[0]), "utf8"))
+    .trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].dataSchemaVersion, "goldboard-market-data-v2");
+  assert.equal(records[0].evidence, "real");
+  assert.equal(records[0].customerAsk, 955.5);
+  assert.equal(records[0].customerBid, 950.5);
+  const state = JSON.parse(await readFile(join(h.dir, "state.json"), "utf8"));
+  assert.equal(state.stateSchemaVersion, 2);
+  assert.equal(state.dataSchemaVersion, "goldboard-market-data-v2");
+});
+
+// ── 11. dispose: the final flush is awaited ─────────────────────────────────
 
 test("integration: dispose flushes pending bars state before resolving", async (t) => {
   freezeSession(t);

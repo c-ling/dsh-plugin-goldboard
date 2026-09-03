@@ -26,8 +26,15 @@ test("stage-zero documentation stays aligned with the released package version",
   assert.match(historical, /探索性诊断/);
 });
 
-test("stage-zero baseline documents are included in the package manifest", () => {
+test("baseline and stage-one documents are included in the package manifest", () => {
   assert.ok(packageJson.files.includes("DESIGN.md"));
   assert.ok(packageJson.files.includes("docs/optimization-roadmap.md"));
+  assert.ok(packageJson.files.includes("docs/stage-1-implementation-plan.md"));
   assert.ok(packageJson.files.includes("docs/v1.11.0-strategy-optimization.md"));
+});
+
+test("stage-one domain and testing subpaths are explicit package exports", () => {
+  for (const subpath of ["./market-data", "./execution", "./history", "./replay", "./testing"]) {
+    assert.equal(typeof packageJson.exports[subpath]?.default, "string", `${subpath} has a default export target`);
+  }
 });

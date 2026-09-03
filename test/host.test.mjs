@@ -65,7 +65,7 @@ import {
   sma,
   snapshotCacheStale,
   windowCoverage,
-} from "../lib/index.js";
+} from "../lib/testing.js";
 import { sendGeneric, validateGenericWebhookConfig } from "../lib/alerts.js";
 
 /** Build `minutes` minute-aligned 1m bars ending at `now` (a Date or ms). */
@@ -1312,13 +1312,12 @@ test("plan engine checks only 5/10m coverage during the first hour of a session"
     },
   };
   const plan = computePlan(runtime, DEFAULT_CONFIG, now);
-  // The 60m window is only ~67% covered (the seam at yesterday's session end
-  // truncates the scanned slots to today's segment), but 30/60m are not
-  // validated during the warm-up hour; the plan proceeds (wait) instead of
-  // data_incomplete.
+  // XAU uses its own 24x5 calendar, so the full 60-minute window is measured
+  // (30/60 observed here). Long windows are not validated during the CMB
+  // reminder warm-up hour; the plan proceeds instead of data_incomplete.
   assert.equal(plan.action, "wait");
   assert.ok(!plan.reasonCodes.some((code) => code.startsWith("data_incomplete")));
-  assert.equal(plan.dataCoverage[60], 0.67);
+  assert.equal(plan.dataCoverage[60], 0.5);
   assert.equal(plan.dataCoverage[5], 1);
 });
 
@@ -2083,7 +2082,10 @@ test("aggregateSubBars overwrites corrupt buckets but keeps uncovered tick bars"
   assert.equal(list[0].h, 28, "aggregated high covers all 12 sub-bars");
   assert.equal(list[0].l, 9);
   assert.equal(list[0].c, 26);
-  assert.deepEqual(list[1], tickBucket);
+  assert.equal(list[1].t, tickBucket.t, "uncovered existing bucket survives");
+  assert.equal(list[1].c, tickBucket.c);
+  assert.equal(list[1].synthetic, true);
+  assert.equal(list[1].dataSchemaVersion, "goldboard-market-data-v2");
 });
 
 test("seedBars merges 5m klines directly and aggregates the 60m lane", () => {

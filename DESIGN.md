@@ -1,6 +1,6 @@
-# dsh-plugin-goldboard — 设计文档（v1.13.0 当前实现）
+# dsh-plugin-goldboard — 设计文档（v1.14.0 当前实现）
 
-> 状态：本文描述 v1.13.0 当前代码口径。v1.11.0 的统一执行账本、独立持仓估值、双边历史增量采集与 replay report v5，以及 v1.12.0 的仓位上限未执行信号，在本版本继续有效；v1.13.0 完成阶段 0 证据与口径冻结。长期样本外验证、风险预算和真实成交回填仍未实现。
+> 状态：v1.13.0 是阶段 0 baseline；v1.14.0 完成阶段 1 数据与执行事实层，升级 market data/execution/state schema、独立日历、长期双边历史与公共接口，但不调整 control 策略。长期样本外验证、风险预算和真实成交回填仍未实现。
 > 证据定位：当前 replay report 明确是探索性诊断，不是实际成交或已验证策略的业绩证明。
 > 目标环境：DeepSeek Harness Web GUI，本地 `link:` 安装到 `web` profile。
 > 插件形态：双面 Cordis 包（Node 宿主半 + 手写 factory-CJS 浏览器半），无构建步骤。
@@ -104,15 +104,15 @@
 ┌──────────────────────────────────▼───────────────────────────────────────────┐
 │                     宿主半（plan-05 模块拆分，index.js 为组合根）                │
 │                                                                              │
-│  lib/index.js（组合根 ≤500 行）：apply() 接线 runtime/settings 缝/tick 循环/     │
-│  路由注册；公开面经 lib/public-api.js 再导出保持不变                              │
+│  lib/index.js（组合根）：apply() 接线 runtime/settings 缝/tick 循环/路由与双写  │
+│  lib/public-api.js 仅导出稳定领域接口；测试兼容面位于 lib/testing.js              │
 │                                                                              │
 │  lib/sources.js  SourceRegistry 实例（每 apply 一个，消灭模块级单例）：          │
 │                  传输 fetch 注入点、报价链预算、熔断、60s 去重、api-log 流       │
 │  lib/parsers.js  各免费源纯解析器（新浪/腾讯/东财/SGE/60s/gold-api/Yahoo/CMB）   │
 │    Au99.99 报价：新浪 gds_AU9999 / 东财 118.AU9999                             │
 │    XAU 现货：  腾讯/新浪 hf_XAU；USDCNY：腾讯 whUSDCNY                          │
-│  lib/market-time.js  北京时区日历、交易时段、覆盖窗口                            │
+│  lib/market-time.js  CMB/SGE/XAU 独立日历、交易时段、完整覆盖事实                │
 │  lib/indicators.js   SMA/EMA、Wilder RSI/ATR、MACD、布林带、5m→10/30m 重采样；    │
 │                      只用收盘 K 线，输出 calculationVersion/warmupReady         │
 │  lib/bars.js         bar 生命周期：recordTick/merge/aggregate/种子迁移/手工 CMB  │
@@ -121,6 +121,7 @@
 │  lib/plan.js         computePlan 四阶段流水线（选道→指标→持仓分支→空仓分支）；      │
 │                      5/10 分钟覆盖率 >80%、30/60 分钟 >60% 才出建议              │
 │  lib/history.js      K 线种子与缺口回填作业                                     │
+│  lib/historical-store.js  按交易日 append-only CMB 双边 point-in-time 历史       │
 │  lib/alerts.js       消息模板、系统通知（osascript/notify-send/PowerShell）、     │
 │                      Webhook 渠道、dispatchAlert、告警边沿评估                   │
 │  lib/snapshot.js     /snapshot 视图 + /replay 确定性回放（黄金快照回归锚点）       │
@@ -129,8 +130,8 @@
 │  lib/config.js       默认值/归一化/密钥脱敏/补丁合并 + plan-04 设置 schema        │
 │                                                                              │
 │  持久化：$DSH_HOME/storages/dsh-plugin-goldboard/{config,state}.json           │
-│            + api-log.jsonl + alerts-log.jsonl                                  │
-│            + analysis-log.jsonl（started/finished，保留/分页/脱敏）              │
+│            + history/*.jsonl（CMB 双边）+ api-log/alerts/analysis logs           │
+│            + state migration backup / SHA-256 manifest                         │
 │                                                                              │
 │  路由（每个路径注册一次，内部按 method 分发）：                                  │
 │    GET/POST /dsh-plugin-goldboard/config                                      │
@@ -160,12 +161,13 @@
 
 `lib/market-quality.js` 是行情适配器与规则/分析调用之间的深模块接口：
 
-- `normalizeQuoteRecord(key, quote)`：统一 `instrument`、`market`、`currency`、`unit`、来源质量和时间字段；Yahoo `GC=F` 固定为 `futures/GC=F`。
-- `normalizeBarRecord()` / `closedBars()`：拒绝无效 OHLC，保留 `synthetic` 和来源元数据，只把已收盘桶交给正式指标。
-- `assessMarketQuality()`：集中检查 stale、OHLC、重复桶、覆盖率、warm-up、品种口径和 CMB 买卖价差，返回稳定 `reasonCodes`。
+- `MarketDataContract` / `normalizeQuoteRecord()`：输出 `goldboard-market-data-v2`，统一 instrument/market/currency/unit、source/sourceTimestamp/receivedAt/ingestedAt、sourceDelay/futureSkew、quality/synthetic 和 customer ask/bid 独立来源；legacy/manual/proxy 不因字段完整而升级为 real。
+- `normalizeBarRecord()` / `closedBars()`：拒绝无效 OHLC，保留 real/synthetic/proxy/unknown 执行证据；缺子 K 或包含 partial 子 K 的自然桶保持 partial，正式指标默认排除。
+- `inspectWindowCoverage()` / `assessMarketQuality()`：同时输出比例、有效样本分钟、最大缺口、距最近缺口、重锚与 missing buckets，并集中检查 stale/future、OHLC、warm-up、品种和依赖质量。
+- `inspectXauConversion()`：XAU 与 USDCNY 两腿共用同一 as-of 质量判断；任一 stale 或未来时间戳都返回 `null + reasonCodes`。
 - `replayMarketPlan()`：用固定 `asOf`、报价和 bars 重建指标与规则 plan，不发起网络请求或模型调用。
 
-指标计算版本为 `goldboard-indicators-v2`，EMA 使用 SMA seed，RSI/ATR 使用 Wilder 平滑。XAU 指标保持 USD/盎司原生口径，只在展示和 CMB 估算价上做当前汇率转换。
+指标计算版本为 `goldboard-indicators-v3`，EMA 使用 SMA seed，RSI/ATR 使用 Wilder 平滑。XAU 指标保持 USD/盎司原生口径，只在 XAU 与 USDCNY 两腿都通过 point-in-time 质量检查后做 CNY/克换算。
 
 ### 5.2 Harness 分析接口
 
@@ -182,6 +184,14 @@
 ### 5.3 客户端设置
 
 客户端继续使用独立 `settings.section`，不改为 `settings.plugin.item`。模型选择保存在插件配置中，不读写 Harness 全局会话模型；查询日志使用独立对话框，支持状态/provider/model/时间筛选、游标分页、详情复制、Escape 关闭和中英文即时切换。
+
+### 5.4 阶段 1 事实层接口
+
+- `getTradingCalendar()` 分别提供 CMB reminder v2、SGE day/night v1 和 XAU 24x5 v1；CMB 用户配置不再过滤 SGE/XAU 历史。snapshot 和 replay 保存实际 lane 的 `calendarVersion`。
+- `HistoricalStore` 按 CMB 交易日追加 JSONL，稳定 event ID 去重、跨实例锁定、as-of 查询；尾部撕裂截断后继续写，中部损坏只隔离对应分区。热 bars 仍双写 `state.json`，便于旧版本回滚。
+- state schema v2 首次迁移前保存原字节备份和 SHA-256 manifest；内容不同的二次迁移生成独立备份，`rollbackStateMigration()` 恢复 manifest 指向的确切文件。
+- `ExecutionModel` v2 是 quote/bar/account/value 的成本 seam。部分 live quote 返回 ask/bid 缺侧 reason code；历史 proxy 只有调用方显式 `allowProxy` 才可投影，且 assumptions 随结果和 report 输出。
+- 根入口不再暴露 parser、可变 bar helper、存储原语或全局 fetch hook；稳定子入口为 `./market-data`、`./execution`、`./history`、`./replay`，内部测试面为 `./testing`。
 
 ---
 
@@ -240,12 +250,12 @@
   - 每周一至周五 09:00–次日 02:00 为可交易时段（周五 09:00 开启的时段延续到周六 02:00 结束）。
   - 周六、周日不开启新时段；法定节假日休市（设置页提供节假日表编辑，v1 默认空表，后续可内置中国法定节假日）。
   - 实际执行以招行 App 交易规则为准；插件时段表只是提醒开关，不代替银行规则。
-- 行情源 Au99.99 与 XAU 的报价仍持续采集，但 `marketState` 决定是否允许开平仓提醒。
+- `marketState` 仍代表 CMB 提醒/执行闸门；行情采集和 replay 则按品种日历：SGE/Au99.99 为北京时间 09:00-11:30、13:30-15:30、20:00-次日 02:30，XAU/USD 为独立 UTC 24x5 template。三者版本分别写入 snapshot/report；未知品种使用 closed adapter，不静默套用 CMB。
 - `marketState` 写入 snapshot：`open / closed`；`open` 表示招行积存金当前可交易。
 - 休市期间：报价看板继续显示最后价，但**抑制所有买入/卖出提醒**；数据过期 > 15 分钟（`STALE_QUOTE_MS`）触发一次 `data_stale` 提醒。
 - 招行积存金价格：
   - 优先：`https://mbmodule-openapi.paas.cmbchina.com/product/v1/func/market-center` 返回 `zBuyPrc`（客户买入价）/ `zSelPrc`（客户卖出价）；折线图使用客户买入价绘制，`average = (zBuyPrc + zSelPrc) / 2` 仅作兼容保留。
-  - 回退：`ask ≈ reference + buyOffset`、`bid ≈ reference + sellOffset`，并用 `estimatedSpreadPerGram` 保证 synthetic 双边最小距离。offset 来源为 `dynamic-bid-ask`（6h 内至少 30 个双边样本）→ `dynamic-legacy`（仅旧 spreadMid 样本）→ `static`；snapshot 同时披露 sample count、synthetic、quality 和 executionVersion。
+  - 回退：`ask ≈ reference + buyOffset`、`bid ≈ reference + sellOffset`，并用 `estimatedSpreadPerGram` 保证 synthetic 双边最小距离。offset 来源为 `dynamic-bid-ask`（6h 内至少 30 个双边样本）→ `dynamic-legacy`（仅旧 spreadMid 样本）→ `static`；snapshot 同时披露 sample count、校准起止时间、CMB/XAU/USDCNY 来源集合、legacy、synthetic、quality 和 executionVersion。
   - 看板标注“招行价以 App 为准”。
   - 招行“昨收/涨跌幅”优先取当天 00:00 的自身 1 分钟价格；若 00:00 无数据，则降级为国际金价昨收折算人民币 + 当前招行价差估算。
 
@@ -387,7 +397,7 @@ pnl = sellProceeds - buyCost
 - 除常规买卖信号外，还额外跟踪最近一次委托建议；按 §7.4 的 v1.9.0 生命周期语义，仅在冲突/漂移/实质更新时以 `cancel_order` / `order_updated` 边沿提醒，观望与数据缺口保持静默监控。
 - **连续确认与冷却语义**：`strategy.confirmBars = N` 表示方向条件需在连续 N 根已收盘 5 分钟 bar 上成立；同一 bar 的重复轮询不重复计数。动作离开方向集、信号道切换、休市或仓位变化会清空 streak。v1.11.0 起仓位变化不再清空 `lastSide/lastAt`，同一 setup 成交后仍受同向冷却约束。
 
-### 7.6 回放诊断口径与局限（v1.13.0，report v5）
+### 7.6 回放诊断口径与局限（v1.14.0，report v5）
 
 只读分析功能，不发提醒、不调模型、不修改真实持仓。v5 把策略决策与订单成交分开：
 
@@ -427,9 +437,9 @@ pnl = sellProceeds - buyCost
 | `version` | `5`，replay wire schema 版本 |
 | `strategyId` / `strategyVersion` | `control` / `goldboard-control-v1`，当前趋势回调规则身份 |
 | `calculationVersion` | `goldboard-indicators-v3`，指标算法版本 |
-| `dataSchemaVersion` | `goldboard-market-data-v1`，当前规范化行情输入契约；不同于 `BARS_SEED_VERSION` |
-| `executionVersion` | `goldboard-execution-v1`，唯一执行账本版本 |
-| `calendarVersion` | `goldboard-configured-session-v1`，当前可配置 session 规则，不是任一品种的官方日历 |
+| `dataSchemaVersion` | 新报告为 `goldboard-market-data-v2`；阶段 0 已落盘报告保留原 `goldboard-market-data-v1` |
+| `executionVersion` | 新报告为 `goldboard-execution-v2`，partial side 与 proxy opt-in 语义固定；旧报告保留 v1 |
+| `calendarVersion` | 按 lane 为 `goldboard-cmb-reminder-v2` 或 `goldboard-sge-calendar-v1`；旧报告保留 `goldboard-configured-session-v1` |
 | `evidenceStatus` | 当前固定为 `exploratory`（探索性诊断）；`validated` 只能由未来独立验证流程显式产生 |
 
 `validationGate` 保存机器可读的 `eligible`、`unmet` 和门槛快照。晋级为 `validated` 至少需要 12 个月历史（目标 24 个月）、6 个月训练/1 个月测试的按月滚动 OOS、测试参数冻结、多折 OOS、真实双边证据、已核实的产品费用语义、基准比较和不确定性区间。当前 replay 只有短窗口诊断，因此 `eligible:false`，不能由成交率、净结果、命中率或回撤推导验证结论。
@@ -572,7 +582,7 @@ pnl = sellProceeds - buyCost
 
 - 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用）。通用 Webhook 统一经过 Host outbound 校验：无凭据 HTTPS、公网 DNS/IP、header allowlist、禁止 redirect；loopback/RFC1918/link-local/metadata 目标返回 `WEBHOOK_URL_BLOCKED`。
 
-### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.13.0，report v5）
+### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.14.0，report v5）
 
 `POST` 请求体：
 
@@ -600,9 +610,9 @@ pnl = sellProceeds - buyCost
   "strategyId": "control",
   "strategyVersion": "goldboard-control-v1",
   "calculationVersion": "goldboard-indicators-v3",
-  "dataSchemaVersion": "goldboard-market-data-v1",
-  "executionVersion": "goldboard-execution-v1",
-  "calendarVersion": "goldboard-configured-session-v1",
+  "dataSchemaVersion": "goldboard-market-data-v2",
+  "executionVersion": "goldboard-execution-v2",
+  "calendarVersion": "goldboard-cmb-reminder-v2",
   "evidenceStatus": "exploratory",
   "validationGate": { "eligible": false, "unmet": ["no_oos_validation", "cost_semantics_unverified"] },
   "generatedAt": "2026-08-14T04:00:00.000Z",
@@ -682,7 +692,7 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
   5. 交易时段（工作日 09:00–次日 02:00，节假日表）
   6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
   7. 数据源状态（来源、最后更新时间、stale 标记）
-- **回放诊断卡片（v1.13.0 / report v5）**：提供天数选择和生成按钮；顶部先显示探索性诊断状态、生成时间、control 与 provenance 版本、5 分钟模拟成交警告、完整/部分时段、fill/expiry rate、账户约束未执行数、双触及数和真实/代理/未知 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数。成本假设（显式费用、滑点、fallback/proxy spread 和未核实的产品费用语义）单独展示。明细弹窗将模拟订单和 `unexecutedSignals` 分表显示，后者明确列出信号时点、价格、当时仓位/上限与原因。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
+- **回放诊断卡片（v1.14.0 / report v5）**：提供天数选择和生成按钮；顶部先显示探索性诊断状态、生成时间、control 与 provenance 版本、5 分钟模拟成交警告、完整/部分时段、fill/expiry rate、账户约束未执行数、双触及数和真实/代理/未知 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数。成本假设（显式费用、滑点、fallback/proxy spread 和未核实的产品费用语义）单独展示。明细弹窗将模拟订单和 `unexecutedSignals` 分表显示，后者明确列出信号时点、价格、当时仓位/上限与原因。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
 - **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
   `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
   - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像
@@ -711,7 +721,9 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
 | --- | --- |
 | `$DSH_HOME/settings.yaml`（goldboard namespace） | **v1.6.0 起的配置主存储（plan-04）**：宿主挂载 settings provider 时，全部配置节经 `installSettingsSection` 注册为 namespace `dsh-plugin-goldboard`，分层为 schema 默认 → cordis entry config（base）→ 用户文档；写入带 revision fencing，secret 字段 `role('secret')` 由 wire 层统一脱敏 |
 | `config.json` | **仅 fallback**（无 settings provider 或 provider 只读）时的脱敏前配置存储；原子写（tmp + rename），并发写串行化。升级首次启动检测到该文件时一次性迁移进 settings namespace 并改名为 `config.json.migrated` 保留（不删除，便于回滚）；namespace 已有用户层时只归档不覆盖 |
-| `state.json` | 行情缓存、bars 缓存、指标状态、提醒状态机、来源熔断状态；v1.5.0 起另含信号道状态（`laneState`）、CMB 价差采样（`cmbSpreadSamples`，容量 512 / TTL 6h）与每日内外盘价差史（`premiumHistory` ≤60 条 + 当日样本） |
+| `state.json` | state schema v2 热缓存：行情、滚动 bars、指标/提醒/信号道状态、CMB 校准样本与溢价史；保留旧字段供旧二进制回滚 |
+| `state.json.v1*.backup` / `state.json.migration-v2.json` | 首次/重复迁移的原字节备份与 source/backup/target SHA-256、版本、时间和回滚路径；无效 JSON 或非对象根隔离为 `.corrupt-*.bak` |
+| `history/*.jsonl` | `HistoricalStore` 按 CMB 交易日 append-only 保存 customer ask/bid、逐侧来源、三类时间、延迟和证据身份；中部损坏分区隔离，尾部撕裂截断恢复 |
 | `alerts-log.json` | 最近 200 条已发提醒（时间、action、价格）；`sentTo` 自 v1.5.0 记录真实渠道结果数组 `[{ channel, ok, error? }]`，替代此前恒为 `[null]` 的占位 |
 | `api-log.jsonl` | 最近 API 调用记录（JSONL，超 2MB 轮转为 `.1`，仅保留一代） |
 
@@ -721,7 +733,7 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
 - 迁移语义：迁移写入的是 normalize 后的完整配置（含当时默认值），此后代码默认值变更
   不影响已迁移用户层——需要回到新默认时在设置页重置该项（unset 后回落 base/默认）。
 
-- 读取损坏时 log warning 并回退默认值，GET 不抛错。
+- `state.json` 损坏或根类型无效时先隔离原件、log warning 再回退；历史 JSONL 仅容忍可恢复的撕裂尾部，中部损坏隔离整个分区，其他交易日继续可读。GET 不抛错。
 - Webhook secret 永不进入 snapshot、bars、日志。
 - 宿主退出后缓存保留；重启先读 `state.json` 再补增量。
 - **分区写盘节奏（v1.4.0）**：state.json 仍是单文件，但按分区脏标记差异化落盘——

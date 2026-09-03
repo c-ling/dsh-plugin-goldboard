@@ -15,7 +15,7 @@ import {
   normalizeConfig,
   redactConfig,
   sectionForSettingsStore,
-} from "../lib/index.js";
+} from "../lib/testing.js";
 
 // ── fakes ────────────────────────────────────────────────────────────────────
 

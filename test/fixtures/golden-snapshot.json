@@ -3,20 +3,50 @@
   "replay": {
     "asOf": "2026-03-13T03:30:00.000Z",
     "calculationVersion": "goldboard-indicators-v3",
+    "dataSchemaVersion": "goldboard-market-data-v2",
     "deterministic": true
   },
   "snapshot": {
     "ok": true,
+    "dataSchemaVersion": "goldboard-market-data-v2",
     "serverTime": "2026-03-13T03:30:00.000Z",
     "marketState": "open",
     "market": {
       "state": "open",
-      "sessionStart": "2026-03-13T09:00:00+08:00",
+      "sessionStart": "2026-03-13T01:00:00.000Z",
       "msToClose": 52200000,
       "nextOpen": "2026-03-16T01:00:00.000Z",
       "open": "09:00",
-      "close": "26:00"
+      "close": "26:00",
+      "calendarVersion": "goldboard-cmb-reminder-v2"
     },
+    "calendars": {
+      "CMB": {
+        "state": "open",
+        "sessionStart": "2026-03-13T01:00:00.000Z",
+        "msToClose": 52200000,
+        "nextOpen": null,
+        "calendarVersion": "goldboard-cmb-reminder-v2",
+        "calendarId": "cmb"
+      },
+      "AU9999": {
+        "state": "closed",
+        "sessionStart": null,
+        "msToClose": 0,
+        "nextOpen": "2026-03-13T05:30:00.000Z",
+        "calendarVersion": "goldboard-sge-calendar-v1",
+        "calendarId": "sge"
+      },
+      "XAU": {
+        "state": "open",
+        "sessionStart": "2026-03-08T22:00:00.000Z",
+        "msToClose": 66600000,
+        "nextOpen": null,
+        "calendarVersion": "goldboard-xau-24x5-v1",
+        "calendarId": "xau"
+      }
+    },
+    "historical": null,
     "quotes": {
       "AU9999": {
         "price": 956.12,
@@ -28,6 +58,7 @@
         "prevClose": 949.5,
         "time": "11:30:00",
         "date": "2026-03-13",
+        "dataSchemaVersion": "goldboard-market-data-v2",
         "source": "sina",
         "instrument": "Au99.99",
         "market": "sge",
@@ -35,14 +66,29 @@
         "unit": "gram",
         "sourceTimestamp": "2026-03-13T03:30:00.000Z",
         "receivedAt": "2026-03-13T03:30:00.000Z",
+        "ingestedAt": "2026-03-13T03:30:00.000Z",
+        "sourceDelayMs": 0,
+        "futureSkewMs": 0,
         "staleAfterMs": 900000,
         "quality": "primary",
+        "synthetic": false,
+        "executionSideComplete": true,
+        "executionEvidence": {
+          "mode": "real",
+          "askSource": "sina",
+          "bidSource": "sina"
+        },
+        "customerAsk": 956.16,
+        "customerBid": 956.08,
+        "customerAskSource": "sina",
+        "customerBidSource": "sina",
         "stale": false
       },
       "XAU": {
         "price": 4103.6,
         "prevClose": 4098.2,
         "time": "2026-03-13T03:29:00.000Z",
+        "dataSchemaVersion": "goldboard-market-data-v2",
         "source": "tencent",
         "instrument": "XAU/USD",
         "market": "spot",
@@ -50,13 +96,28 @@
         "unit": "troy_ounce",
         "sourceTimestamp": "2026-03-13T03:29:00.000Z",
         "receivedAt": "2026-03-13T03:30:00.000Z",
+        "ingestedAt": "2026-03-13T03:30:00.000Z",
+        "sourceDelayMs": 60000,
+        "futureSkewMs": 0,
         "staleAfterMs": 900000,
         "quality": "primary",
+        "synthetic": false,
+        "executionSideComplete": false,
+        "executionEvidence": {
+          "mode": "unknown",
+          "askSource": null,
+          "bidSource": null
+        },
+        "customerAsk": null,
+        "customerBid": null,
+        "customerAskSource": null,
+        "customerBidSource": null,
         "stale": false
       },
       "GCF": {
         "price": 4109.5,
         "time": "2026-03-13T03:28:00.000Z",
+        "dataSchemaVersion": "goldboard-market-data-v2",
         "source": "yahoo",
         "instrument": "GC=F",
         "market": "futures",
@@ -64,13 +125,28 @@
         "unit": "troy_ounce",
         "sourceTimestamp": "2026-03-13T03:28:00.000Z",
         "receivedAt": "2026-03-13T03:30:00.000Z",
+        "ingestedAt": "2026-03-13T03:30:00.000Z",
+        "sourceDelayMs": 120000,
+        "futureSkewMs": 0,
         "staleAfterMs": 900000,
         "quality": "fallback",
+        "synthetic": false,
+        "executionSideComplete": false,
+        "executionEvidence": {
+          "mode": "unknown",
+          "askSource": null,
+          "bidSource": null
+        },
+        "customerAsk": null,
+        "customerBid": null,
+        "customerAskSource": null,
+        "customerBidSource": null,
         "stale": false
       },
       "USDCNY": {
         "price": 7.2385,
         "time": "11:29:58",
+        "dataSchemaVersion": "goldboard-market-data-v2",
         "source": "tencent",
         "instrument": "USD/CNY",
         "market": "forex",
@@ -78,23 +154,55 @@
         "unit": "rate",
         "sourceTimestamp": "2026-03-13T03:29:58.000Z",
         "receivedAt": "2026-03-13T03:30:00.000Z",
+        "ingestedAt": "2026-03-13T03:30:00.000Z",
+        "sourceDelayMs": 2000,
+        "futureSkewMs": 0,
         "staleAfterMs": 900000,
         "quality": "primary",
+        "synthetic": false,
+        "executionSideComplete": false,
+        "executionEvidence": {
+          "mode": "unknown",
+          "askSource": null,
+          "bidSource": null
+        },
+        "customerAsk": null,
+        "customerBid": null,
+        "customerAskSource": null,
+        "customerBidSource": null,
         "stale": false
       },
       "CMB": {
         "price": 963.42,
+        "bid": 958.42,
+        "ask": 963.42,
         "buyPrice": 963.42,
         "sellPrice": 958.42,
         "average": 960.92,
+        "dataSchemaVersion": "goldboard-market-data-v2",
         "source": "cmb",
         "instrument": "CMB_ACCUMULATED_GOLD",
         "market": "bank",
         "currency": "CNY",
         "unit": "gram",
+        "sourceTimestamp": null,
         "receivedAt": "2026-03-13T03:30:00.000Z",
+        "ingestedAt": "2026-03-13T03:30:00.000Z",
+        "sourceDelayMs": null,
+        "futureSkewMs": null,
         "staleAfterMs": 900000,
         "quality": "primary",
+        "synthetic": false,
+        "executionSideComplete": true,
+        "executionEvidence": {
+          "mode": "real",
+          "askSource": "cmb",
+          "bidSource": "cmb"
+        },
+        "customerAsk": 963.42,
+        "customerBid": 958.42,
+        "customerAskSource": "cmb",
+        "customerBidSource": "cmb",
         "customerBuy": 963.42,
         "customerSell": 958.42,
         "spread": 5,
@@ -104,6 +212,48 @@
     },
     "manualPrevClose": {},
     "derived": {
+      "xauConversion": {
+        "ready": true,
+        "value": 955,
+        "reasonCodes": [],
+        "dependencies": [
+          {
+            "id": "XAU",
+            "stale": false,
+            "future": false,
+            "ageMs": 0,
+            "sourceAgeMs": 60000,
+            "sourceDelayMs": 60000,
+            "futureSkewMs": 0,
+            "staleAfterMs": 900000,
+            "source": "tencent",
+            "sourceTimestamp": "2026-03-13T03:29:00.000Z",
+            "receivedAt": "2026-03-13T03:30:00.000Z",
+            "ingestedAt": "2026-03-13T03:30:00.000Z",
+            "quality": "primary",
+            "synthetic": false,
+            "executionSideComplete": false
+          },
+          {
+            "id": "USDCNY",
+            "stale": false,
+            "future": false,
+            "ageMs": 0,
+            "sourceAgeMs": 2000,
+            "sourceDelayMs": 2000,
+            "futureSkewMs": 0,
+            "staleAfterMs": 900000,
+            "source": "tencent",
+            "sourceTimestamp": "2026-03-13T03:29:58.000Z",
+            "receivedAt": "2026-03-13T03:30:00.000Z",
+            "ingestedAt": "2026-03-13T03:30:00.000Z",
+            "quality": "primary",
+            "synthetic": false,
+            "executionSideComplete": false
+          }
+        ],
+        "asOf": "2026-03-13T03:30:00.000Z"
+      },
       "xauCnyPerGram": 955,
       "domesticPremiumPerGram": 1.12,
       "domesticPremiumRatio": 0.001173,
@@ -120,7 +270,7 @@
         "live": true,
         "synthetic": false,
         "quality": "primary",
-        "executionVersion": "goldboard-execution-v1",
+        "executionVersion": "goldboard-execution-v2",
         "costComponents": {
           "explicitFeePerGram": 5,
           "slippagePerGram": 0.2,
@@ -145,23 +295,84 @@
         "synthetic_bars",
         "premium_history_accumulating"
       ],
+      "dataSchemaVersion": "goldboard-market-data-v2",
       "calculationVersion": "goldboard-indicators-v3",
       "quote": {
+        "id": "CMB_ACCUMULATED_GOLD",
         "stale": false,
+        "future": false,
         "ageMs": 0,
         "sourceAgeMs": null,
-        "sourceDelayMs": null,
-        "futureSkewMs": null,
+        "sourceDelayMs": 0,
+        "futureSkewMs": 0,
+        "staleAfterMs": 900000,
         "source": "cmb",
-        "instrument": "CMB_ACCUMULATED_GOLD",
-        "market": "bank",
-        "quality": "primary"
+        "sourceTimestamp": null,
+        "receivedAt": "2026-03-13T03:30:00.000Z",
+        "ingestedAt": "2026-03-13T03:30:00.000Z",
+        "quality": "primary",
+        "synthetic": false,
+        "executionSideComplete": true
       },
       "coverage": {
         "5": 1,
         "10": 1,
         "30": 1,
         "60": 1
+      },
+      "coverageDetails": {
+        "5": {
+          "windowMinutes": 5,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 5,
+          "effectiveSampleMinutes": 5,
+          "observedSampleMinutes": 5,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        },
+        "10": {
+          "windowMinutes": 10,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 10,
+          "effectiveSampleMinutes": 10,
+          "observedSampleMinutes": 10,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        },
+        "30": {
+          "windowMinutes": 30,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 30,
+          "effectiveSampleMinutes": 30,
+          "observedSampleMinutes": 30,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        },
+        "60": {
+          "windowMinutes": 60,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 60,
+          "effectiveSampleMinutes": 60,
+          "observedSampleMinutes": 60,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        }
       },
       "requiredCoverage": [
         5,
@@ -176,8 +387,16 @@
           "future": false,
           "ageMs": 0,
           "sourceAgeMs": null,
-          "futureSkewMs": null,
-          "source": "cmb"
+          "sourceDelayMs": 0,
+          "futureSkewMs": 0,
+          "staleAfterMs": 900000,
+          "source": "cmb",
+          "sourceTimestamp": null,
+          "receivedAt": "2026-03-13T03:30:00.000Z",
+          "ingestedAt": "2026-03-13T03:30:00.000Z",
+          "quality": "primary",
+          "synthetic": false,
+          "executionSideComplete": true
         }
       ],
       "warmupReady": false,
@@ -192,7 +411,15 @@
         "duplicateBuckets": 0,
         "nonMonotonic": 0,
         "syntheticCount": 222,
+        "partialCount": 0,
+        "evidenceCounts": {
+          "real": 0,
+          "synthetic": 222,
+          "proxy": 0,
+          "unknown": 0
+        },
         "synthetic": true,
+        "partial": false,
         "ok": true
       }
     },
@@ -1247,13 +1474,6 @@
           "h": 957.51,
           "l": 957.37,
           "c": 957.45
-        },
-        {
-          "t": "2026-03-13T03:30:00.000Z",
-          "o": 957.48,
-          "h": 957.56,
-          "l": 957.42,
-          "c": 957.5
         }
       ],
       "XAU_1m": [],
@@ -2550,6 +2770,7 @@
         "spreadPerGram": 5,
         "synthetic": false,
         "realBidAsk": true,
+        "evidence": "real",
         "quality": "primary",
         "source": "cmb",
         "asOf": "2026-03-13T03:30:00.000Z",
@@ -2558,7 +2779,8 @@
           "quotedSpreadPerGram": 5,
           "estimatedSpreadAppliedPerGram": 0
         },
-        "executionVersion": "goldboard-execution-v1"
+        "assumptions": [],
+        "executionVersion": "goldboard-execution-v2"
       },
       "reasonCodes": [
         "target_reached",
@@ -2570,6 +2792,60 @@
         "30": 1,
         "60": 1
       },
+      "dataCoverageDetails": {
+        "5": {
+          "windowMinutes": 5,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 5,
+          "effectiveSampleMinutes": 5,
+          "observedSampleMinutes": 5,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        },
+        "10": {
+          "windowMinutes": 10,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 10,
+          "effectiveSampleMinutes": 10,
+          "observedSampleMinutes": 10,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        },
+        "30": {
+          "windowMinutes": 30,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 30,
+          "effectiveSampleMinutes": 30,
+          "observedSampleMinutes": 30,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        },
+        "60": {
+          "windowMinutes": 60,
+          "coverageRatio": 1,
+          "expectedSampleMinutes": 60,
+          "effectiveSampleMinutes": 60,
+          "observedSampleMinutes": 60,
+          "largestGapMinutes": 0,
+          "minutesSinceLastGap": null,
+          "reanchored": false,
+          "reanchorGapMinutes": 0,
+          "missingBuckets": [],
+          "complete": true
+        }
+      },
       "dataQuality": {
         "status": "degraded",
         "ready": true,
@@ -2578,23 +2854,84 @@
           "longest_indicator_warmup",
           "synthetic_bars"
         ],
+        "dataSchemaVersion": "goldboard-market-data-v2",
         "calculationVersion": "goldboard-indicators-v3",
         "quote": {
+          "id": "CMB_ACCUMULATED_GOLD",
           "stale": false,
+          "future": false,
           "ageMs": 0,
           "sourceAgeMs": null,
-          "sourceDelayMs": null,
-          "futureSkewMs": null,
+          "sourceDelayMs": 0,
+          "futureSkewMs": 0,
+          "staleAfterMs": 900000,
           "source": "cmb",
-          "instrument": "CMB_ACCUMULATED_GOLD",
-          "market": "bank",
-          "quality": "primary"
+          "sourceTimestamp": null,
+          "receivedAt": "2026-03-13T03:30:00.000Z",
+          "ingestedAt": "2026-03-13T03:30:00.000Z",
+          "quality": "primary",
+          "synthetic": false,
+          "executionSideComplete": true
         },
         "coverage": {
           "5": 1,
           "10": 1,
           "30": 1,
           "60": 1
+        },
+        "coverageDetails": {
+          "5": {
+            "windowMinutes": 5,
+            "coverageRatio": 1,
+            "expectedSampleMinutes": 5,
+            "effectiveSampleMinutes": 5,
+            "observedSampleMinutes": 5,
+            "largestGapMinutes": 0,
+            "minutesSinceLastGap": null,
+            "reanchored": false,
+            "reanchorGapMinutes": 0,
+            "missingBuckets": [],
+            "complete": true
+          },
+          "10": {
+            "windowMinutes": 10,
+            "coverageRatio": 1,
+            "expectedSampleMinutes": 10,
+            "effectiveSampleMinutes": 10,
+            "observedSampleMinutes": 10,
+            "largestGapMinutes": 0,
+            "minutesSinceLastGap": null,
+            "reanchored": false,
+            "reanchorGapMinutes": 0,
+            "missingBuckets": [],
+            "complete": true
+          },
+          "30": {
+            "windowMinutes": 30,
+            "coverageRatio": 1,
+            "expectedSampleMinutes": 30,
+            "effectiveSampleMinutes": 30,
+            "observedSampleMinutes": 30,
+            "largestGapMinutes": 0,
+            "minutesSinceLastGap": null,
+            "reanchored": false,
+            "reanchorGapMinutes": 0,
+            "missingBuckets": [],
+            "complete": true
+          },
+          "60": {
+            "windowMinutes": 60,
+            "coverageRatio": 1,
+            "expectedSampleMinutes": 60,
+            "effectiveSampleMinutes": 60,
+            "observedSampleMinutes": 60,
+            "largestGapMinutes": 0,
+            "minutesSinceLastGap": null,
+            "reanchored": false,
+            "reanchorGapMinutes": 0,
+            "missingBuckets": [],
+            "complete": true
+          }
         },
         "requiredCoverage": [
           5,
@@ -2609,8 +2946,16 @@
             "future": false,
             "ageMs": 0,
             "sourceAgeMs": null,
-            "futureSkewMs": null,
-            "source": "cmb"
+            "sourceDelayMs": 0,
+            "futureSkewMs": 0,
+            "staleAfterMs": 900000,
+            "source": "cmb",
+            "sourceTimestamp": null,
+            "receivedAt": "2026-03-13T03:30:00.000Z",
+            "ingestedAt": "2026-03-13T03:30:00.000Z",
+            "quality": "primary",
+            "synthetic": false,
+            "executionSideComplete": true
           }
         ],
         "warmupReady": false,
@@ -2625,7 +2970,15 @@
           "duplicateBuckets": 0,
           "nonMonotonic": 0,
           "syntheticCount": 222,
+          "partialCount": 0,
+          "evidenceCounts": {
+            "real": 0,
+            "synthetic": 222,
+            "proxy": 0,
+            "unknown": 0
+          },
           "synthetic": true,
+          "partial": false,
           "ok": true
         }
       },

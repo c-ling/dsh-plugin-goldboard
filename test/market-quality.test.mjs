@@ -12,7 +12,7 @@ import {
   normalizeConfig,
   normalizeQuoteRecord,
   replayMarketPlan,
-} from "../lib/index.js";
+} from "../lib/testing.js";
 
 function bars(count, intervalMinutes, end, base = 100, metadata = {}) {
   const out = [];
@@ -68,7 +68,7 @@ test("quote timestamps normalize compact Beijing, epoch seconds/milliseconds and
   assert.equal(secondsString.sourceTimestamp, "2026-08-28T12:03:00.000Z");
 
   const invalid = normalizeQuoteRecord("XAU", { price: 4_000, source: "test", sourceTimestamp: "not-a-date" }, receivedAt);
-  assert.equal(invalid.sourceTimestamp, undefined);
+  assert.equal(invalid.sourceTimestamp, null);
 });
 
 test("quality blocks timestamps materially in the future", () => {

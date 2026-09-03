@@ -111,9 +111,15 @@ test("execution bars distinguish persisted bid/ask from one-sided CMB proxies", 
   assert.equal(real.realBidAsk, true);
   assert.equal(real.bidBar.h, 101);
 
-  const proxy = resolveExecutionBar({ lane: "cmb", cmbSpreadPerGram: 5, bar: { o: 105, h: 106, l: 104, c: 105 } }, CONFIG);
+  const strict = resolveExecutionBar({ lane: "cmb", bar: { o: 105, h: 106, l: 104, c: 105 } }, CONFIG);
+  assert.equal(strict.available, false);
+  assert.equal(strict.bidBar, null);
+  assert.equal(strict.reasonCode, "execution_quote_unavailable");
+
+  const proxy = resolveExecutionBar({ lane: "cmb", allowProxy: true, cmbSpreadPerGram: 5, bar: { o: 105, h: 106, l: 104, c: 105 } }, CONFIG);
   assert.equal(proxy.realBidAsk, false);
   assert.equal(proxy.askBar.h, 106);
   assert.equal(proxy.bidBar.h, 101);
   assert.equal(proxy.quality, "proxy");
+  assert.equal(proxy.evidence, "proxy");
 });
