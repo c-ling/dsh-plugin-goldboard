@@ -12,6 +12,7 @@ import {
   EXECUTION_BID_UNAVAILABLE,
   MARKET_DATA_SCHEMA_VERSION,
   SourceRegistry,
+  STATE_SCHEMA_VERSION,
   aggregateSubBars,
   buildSnapshot,
   closedBars,
@@ -264,7 +265,7 @@ test("live, snapshot, and replay share one execution cash-flow breakdown", () =>
   assert.equal(snapshot.derived.cmb.costComponents.quotedSpreadPerGram, 5);
 });
 
-test("state v2 migration backs up bytes, emits a manifest, rolls back, and isolates corruption", async (t) => {
+test("state migration backs up bytes, emits a current manifest, rolls back, and isolates corruption", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "goldboard-stage1-state-"));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const file = join(directory, "state.json");
@@ -284,13 +285,13 @@ test("state v2 migration backs up bytes, emits a manifest, rolls back, and isola
     now: () => new Date("2026-08-14T03:00:00.000Z"),
   });
   assert.equal(loaded.migrated, true);
-  assert.equal(loaded.state.stateSchemaVersion, 2);
+  assert.equal(loaded.state.stateSchemaVersion, STATE_SCHEMA_VERSION);
   assert.equal(loaded.state.quotes.CMB.dataSchemaVersion, MARKET_DATA_SCHEMA_VERSION);
   assert.equal(loaded.state.quotes.CMB.executionEvidence.mode, "proxy");
   assert.equal(loaded.state.bars.CMB[1][0].dataSchemaVersion, MARKET_DATA_SCHEMA_VERSION);
   assert.equal(loaded.state.bars.CMB[1][0].executionEvidence.mode, "proxy");
   assert.equal(await readFile(loaded.backupPath, "utf8"), original);
-  assert.equal(existsSync(`${file}.migration-v2.json`), true);
+  assert.equal(existsSync(`${file}.migration-v${STATE_SCHEMA_VERSION}.json`), true);
 
   await writeFile(file, "changed", "utf8");
   await rollbackStateMigration({ file, backupPath: loaded.backupPath, writeQueue: makeWriteQueue() });
@@ -362,9 +363,13 @@ test("root API excludes test hooks while the testing entry retains them", async 
   const packagedRoot = await import("dsh-plugin-goldboard");
   const packagedTesting = await import("dsh-plugin-goldboard/testing");
   const packagedExecution = await import("dsh-plugin-goldboard/execution");
+  const packagedRisk = await import("dsh-plugin-goldboard/risk");
+  const packagedLedger = await import("dsh-plugin-goldboard/ledger");
   assert.equal("__setFetchImpl" in packagedRoot, false);
   assert.equal(typeof packagedTesting.__setFetchImpl, "function");
   assert.equal(typeof packagedExecution.createExecutionModel, "function");
+  assert.equal(typeof packagedRisk.RiskPolicy, "function");
+  assert.equal(typeof packagedLedger.createSignalLedger, "function");
 });
 
 test("snapshot publishes schema v2, independent calendar versions, and deterministic coverage details", () => {

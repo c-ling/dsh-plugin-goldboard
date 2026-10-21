@@ -21,21 +21,24 @@ import { normalizeConfig } from "../lib/config.js";
 const CLIENT_SOURCE = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
 
 /** useState call order inside SettingsSection — seed by index. */
-const STATE = { DATA: 0, DRAFT: 1, STATS_RESULT: 20, STATS_DETAILS_OPEN: 22 };
+const STATE = { DATA: 0, DRAFT: 1, RISK_STATUS: 13, STATS_RESULT: 21, STATS_DETAILS_OPEN: 23, RISK_LEDGER_OPEN: 24 };
 
 function reactStubWith(seeds) {
   let index = 0;
   let activeSeeds = seeds;
   return {
+    Component: class { constructor(props) { this.props = props; this.state = {}; } setState() {} },
     createElement(type, props, ...children) { return { type, props, children }; },
     memo: (fn) => fn,
     useState(initial) {
       const i = index++;
       if (Object.prototype.hasOwnProperty.call(activeSeeds, i)) {
         const value = activeSeeds[i];
-        return [typeof value === "function" ? value() : value, () => {}];
+        const resolved = typeof value === "function" ? value() : value;
+        return [resolved, (next) => { if (typeof next === "function") next(resolved); }];
       }
-      return [typeof initial === "function" ? initial() : initial, () => {}];
+      const resolved = typeof initial === "function" ? initial() : initial;
+      return [resolved, (next) => { if (typeof next === "function") next(resolved); }];
     },
     useCallback: (fn) => fn,
     useEffect: () => {},
@@ -113,30 +116,35 @@ function renderStats(reportFixture, options = {}) {
   };
   const localeStub = { bind: () => (key) => key, register: () => () => {} };
   const reactHooks = reactStubWith({
-    [STATE.DRAFT]: normalizeConfig({}),
+    [STATE.DRAFT]: options.rawConfig ?? normalizeConfig(options.config ?? {}),
+    [STATE.RISK_STATUS]: options.riskStatus ?? null,
     [STATE.STATS_RESULT]: reportFixture,
     [STATE.STATS_DETAILS_OPEN]: options.details ? true : false,
+    [STATE.RISK_LEDGER_OPEN]: options.ledgerDetails ? true : false,
   });
   const clientExports = captured.factory((id) => {
     if (id === "react") return reactHooks;
     throw new Error("unexpected require: " + id);
   });
-  clientExports.apply({
-    get(id) {
-      if (id === "slots") return slotsStub;
-      if (id === "locale") return localeStub;
-      return undefined;
-    },
-    effect(fn) { fn(); return () => {}; },
-  });
-  assert.ok(settingsSection, "SettingsSection component is registered");
+  assert.equal(typeof clientExports.SettingsSection, "function", "SettingsSection is exported for tests");
   const translate = (key, params) => {
     if (key === "statsParamConfirmBars") return `cb${params.n}`;
     if (key === "statsUnexecutedReason_position_limit") return "reason-position-limit";
     return key;
   };
-  const tree = settingsSection({ t: translate });
+  const tree = clientExports.SettingsSection({ t: translate, mode: "strategy" });
   assert.ok(tree, "component rendered a tree");
+  if (options.ledgerDetails) {
+    assert.equal(typeof clientExports.RiskLedgerDialog, "function", "RiskLedgerDialog is exported for tests");
+    reactHooks.reset({
+      0: options.ledgerDetails,
+      1: "",
+      2: false,
+    });
+    const ledgerTree = clientExports.RiskLedgerDialog({ t: translate, onClose: () => {}, initialResetArm: false });
+    assert.ok(ledgerTree, "risk ledger dialog rendered a tree");
+    return ledgerTree;
+  }
   if (!options.details) return tree;
 
   const dialogNode = findNodes(tree, (node) => typeof node.type === "function" && node.type.name === "ReplayStatsDetailsDialog")[0];
@@ -209,7 +217,7 @@ function fixtureReport(version) {
       exitEvents: 1,
     };
   }
-  if (version === 5) {
+  if (version >= 5) {
     base.calculationVersion = "goldboard-indicators-v3";
     base.strategyId = "control";
     base.strategyVersion = "goldboard-control-v1";
@@ -259,6 +267,54 @@ function fixtureReport(version) {
       "complete-session-only",
     ];
   }
+  if (version === 6) {
+    base.reportSchema = "goldboard-replay-report-v6";
+    base.inputFingerprint = "a".repeat(64);
+    base.reportFingerprint = "b".repeat(64);
+    base.dataVersion = "dataset-fixture";
+    base.dataset = {
+      datasetId: "dataset-fixture",
+      dateRange: { from: "2025-01-01T00:00:00.000Z", to: "2025-12-31T23:55:00.000Z" },
+      historyMonths: 11.99,
+      records: { accepted: 1000 },
+      bars: { 5: { complete: 900, total: 1000 } },
+    };
+    base.metrics = {
+      sharpe: 0.8,
+      sortino: 1.1,
+      calmar: 0.4,
+      exposureRatio: 0.25,
+      capitalUtilization: 0.15,
+      maxDrawdownCny: 80,
+      maxDrawdownPct: 0.02,
+      maxDrawdownDurationMs: 7200000,
+      turnoverCny: 12000,
+      profitFactor: 1.2,
+      returnInterval: { lower: -0.01, upper: 0.02 },
+      winRateInterval: { lower: 0.3, upper: 0.7 },
+    };
+    base.oos = {
+      status: "insufficient_data",
+      observed: { completedFolds: 0 },
+      folds: [{
+        foldId: "fold-1",
+        status: "ready",
+        train: { from: "2025-01-01T00:00:00.000Z", toExclusive: "2025-07-01T00:00:00.000Z" },
+        test: { from: "2025-07-01T00:00:00.000Z", toExclusive: "2025-08-01T00:00:00.000Z", completeSessions: 20 },
+      }],
+    };
+    base.benchmarks = Object.fromEntries([
+      ["no_trade", 0],
+      ["buy_and_hold", 120],
+      ["fixed_interval_dca", 80],
+      ["simple_moving_average", 40],
+    ].map(([id, net]) => [id, { status: "ok", metrics: { netPnlCny: net, totalReturn: net / 10000, maxDrawdownPct: 0.01 } }]));
+    base.validationGate = {
+      status: "not_eligible",
+      eligible: false,
+      unmet: ["minimum_history_months", "multiple_oos_folds", "verified_cost_semantics"],
+    };
+  }
   return base;
 }
 
@@ -291,6 +347,32 @@ test("stats panel renders v5 execution diagnostics and continuous-account cards"
   const tips = strings.filter((text) => text.startsWith("title:statsTip"));
   assert.ok(tips.includes("title:statsTipHoldNet"));
   assert.ok(tips.includes("title:statsTipExitSaving"));
+});
+
+test("stats panel renders v6 dataset, metrics, OOS, benchmarks, and fail-closed evidence", () => {
+  const tree = renderStats({ ok: true, cached: false, report: fixtureReport(6) });
+  const strings = collectStrings(tree);
+  for (const key of [
+    "statsV6Banner",
+    "statsDatasetTitle",
+    "statsDatasetId",
+    "statsInputFingerprint",
+    "statsReportFingerprint",
+    "statsMetricsTitle",
+    "statsMetricSharpe",
+    "statsReturnInterval",
+    "statsWinInterval",
+    "statsOosTitle",
+    "statsOosSummary",
+    "statsFoldTrain",
+    "statsBenchmarksTitle",
+    "statsBenchmark_buy_and_hold",
+    "statsValidationNotEligible",
+  ]) {
+    assert.ok(strings.includes(key), `${key} rendered`);
+  }
+  assert.ok(!strings.includes("statsEvidenceValidated"));
+  assert.ok(!strings.includes("statsV5Banner"));
 });
 
 test("stats details render account orders and position-limit signals separately", () => {
@@ -364,14 +446,20 @@ test("stats panel limits the quoted-spread rule to reports with real bid/ask bar
   assert.ok(strings.includes("statsCostProxy"));
 });
 
-test("stats panel accepts a validated label only with an explicit eligible gate", () => {
-  const report = fixtureReport(5);
+test("stats panel accepts a validated label only for a recognized v6 schema with an eligible gate", () => {
+  const report = fixtureReport(6);
   report.evidenceStatus = "validated";
   report.validationGate = { status: "eligible", eligible: true, unmet: [] };
   const strings = collectStrings(renderStats({ ok: true, cached: true, report }));
   assert.ok(strings.includes("statsEvidenceValidated"));
   assert.ok(!strings.includes("statsEvidenceExploratory"));
   assert.ok(!strings.includes("statsValidationNotEligible"));
+
+  const legacy = fixtureReport(5);
+  legacy.evidenceStatus = "validated";
+  legacy.validationGate = { status: "eligible", eligible: true, unmet: [] };
+  const legacyStrings = collectStrings(renderStats({ ok: true, cached: true, report: legacy }));
+  assert.ok(!legacyStrings.includes("statsEvidenceValidated"), "legacy metadata cannot spoof v6 validation");
 });
 
 test("stats panel does not infer missing stage-zero metadata from an old report", () => {
@@ -387,4 +475,73 @@ test("stats panel does not infer missing stage-zero metadata from an old report"
   assert.ok(strings.includes("statsCoverageUnavailable"), "missing coverage is not treated as zero");
   assert.ok(strings.includes("statsCaveatUnknown"), "unknown caveat renders safely");
   assert.ok(!strings.includes("statsEvidenceValidated"), "legacy report is never promoted to validated");
+});
+
+test("settings renders budget controls and explicit risk-ledger gate state", () => {
+  const tree = renderStats(null, {
+    config: { risk: { mode: "budget", maxRiskPerTradeCny: 500, maxDailyLossCny: 100 } },
+    riskStatus: {
+      risk: {
+        gate: { triggered: true, allowNewBuy: false, allowProtectiveExit: true, reasonCodes: ["max_daily_loss"] },
+        losses: { dailyLossCny: 100, weeklyLossCny: 100, drawdownCny: 100 },
+        adds: { today: 1, activeSetup: 1 },
+      },
+      ledger: {
+        activeSetupId: "setup-stable-id",
+        addsToday: 1,
+        activeSetupAdds: 1,
+        counts: { decisions: 3, orders: 2, notExecuted: 1 },
+      },
+    },
+  });
+  const strings = collectStrings(tree);
+  assert.ok(strings.includes("title:riskTitle"));
+  assert.ok(strings.includes("riskGateBlocked"));
+  assert.ok(strings.includes("riskGateProtectiveExitAllowed"));
+  assert.ok(strings.includes("riskDailyLoss"));
+  assert.ok(strings.includes("riskLedgerCounts"));
+  assert.ok(strings.includes("riskEvidenceHint"));
+
+  const selects = findNodes(tree, (node) => typeof node.type === "function" && node.type.name === "SelectField");
+  assert.ok(selects.some((node) => node.props.label === "riskMode" && node.props.value === "budget"));
+  const numbers = findNodes(tree, (node) => typeof node.type === "function" && node.type.name === "NumberField");
+  const labels = new Set(numbers.map((node) => node.props.label));
+  for (const key of ["referenceEquityCny", "maxAmountCny", "maxRiskPerTradeCny", "maxDailyLossCny", "maxWeeklyLossCny", "maxDrawdownCny", "volatilityTarget", "liquidityCapGrams", "maxAddsPerSetup", "maxAddsPerDay", "minAddPriceImprovement", "consecutiveLossDeRisk"]) {
+    assert.ok(labels.has(key), `${key} control rendered`);
+  }
+});
+
+test("risk controls tolerate an older host config without a risk section", () => {
+  const oldHostConfig = normalizeConfig({});
+  delete oldHostConfig.risk;
+  const tree = renderStats(null, { rawConfig: oldHostConfig });
+  const mode = findNodes(tree, (node) => typeof node.type === "function" && node.type.name === "SelectField" && node.props.label === "riskMode")[0];
+  const amount = findNodes(tree, (node) => typeof node.type === "function" && node.type.name === "NumberField" && node.props.label === "maxAmountCny")[0];
+  assert.ok(mode && amount);
+  assert.doesNotThrow(() => mode.props.onChange("budget"));
+  assert.doesNotThrow(() => amount.props.onChange(1000));
+});
+
+test("risk ledger dialog renders pending, filled, replaced, expired, and not-executed trajectories", () => {
+  const tree = renderStats(null, {
+    ledgerDetails: {
+      ok: true,
+      orders: [
+        { orderId: "order-p", setupId: "setup-1", decisionId: "decision-1", status: "pending", action: "buy_setup", grams: 2, limitPrice: 100, issuedAt: "2026-08-14T02:00:00Z" },
+        { orderId: "order-f", setupId: "setup-1", decisionId: "decision-2", status: "filled", action: "add_position", grams: 2, filledGrams: 2, fillPrice: 99, filledAt: "2026-08-14T02:05:00Z" },
+        { orderId: "order-r", setupId: "setup-1", decisionId: "decision-3", status: "replaced", action: "add_position", grams: 2, limitPrice: 98, completedAt: "2026-08-14T02:10:00Z" },
+        { orderId: "order-e", setupId: "setup-1", decisionId: "decision-4", status: "expired", action: "add_position", grams: 2, limitPrice: 97, completedAt: "2026-08-14T02:15:00Z" },
+      ],
+      decisions: [
+        { decisionId: "decision-5", setupId: "setup-1", status: "not_executed", candidateAction: "add_position", suggestedGrams: 0, positionGrams: 10, blockedReasonCodes: ["max_daily_loss"], at: "2026-08-14T02:20:00Z" },
+      ],
+    },
+  });
+  const strings = collectStrings(tree);
+  for (const key of ["ledgerOrders", "ledgerDecisions", "pending", "filled", "replaced", "expired", "not_executed"]) {
+    assert.ok(strings.includes(key), `${key} rendered`);
+  }
+  assert.ok(strings.includes("order-p"));
+  assert.ok(strings.includes("decision-5"));
+  assert.ok(strings.includes("max_daily_loss"));
 });

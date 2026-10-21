@@ -1,6 +1,6 @@
 # dsh-plugin-goldboard 后续优化路线
 
-> 状态：阶段 0 已于 v1.13.0 完成；阶段 1 数据与执行事实层随 v1.14.0 完成并发布；阶段 2-5 仍为规划概要。
+> 状态：阶段 0 已于 v1.13.0 完成；阶段 1 数据与执行事实层随 v1.14.0 完成并发布；阶段 2 风险闸门/订单生命周期、阶段 3 ReplaySimulator/长期验证框架与阶段 4 策略实验层已随 v1.15.0 发布；阶段 5 仍为规划概要。阶段 3-4 的真实验证结论仍受至少 12 个月 point-in-time 历史、真实双边覆盖、XAU/USDCNY 联合点时数据和费用语义核验约束，框架与候选实现完成不等于策略已验证或可晋级。
 >
 > 研究依据：`dsh-other/docs/research/gold-trading-repos.md`《GitHub 黄金交易开源仓库调研：策略方案、自动化手段与量化方法》。当前工作区中该研究文件位于相邻仓库；本文件将其结论映射到 `dsh-plugin-goldboard`。
 >
@@ -33,7 +33,7 @@ v1.12.0 已经实现：
 - 信号确认、同向 cooldown、信号道粘滞、仓位上限和告警生命周期；
 - 系统通知、Webhook 及通用 Webhook 的 Host 侧 SSRF 防护；
 - 手动模型分析、输出 schema 校验、超时、取消、缓存和脱敏审计日志；
-- 双语设置页、浮窗和基础统计视图。
+- 双语侧边栏看板页面（5 Tab）和基础统计视图。
 
 这些能力改善了工程可靠性，但不等于已经完成长期样本外验证、真实成交验证或风险调整后的策略验证。
 
@@ -71,7 +71,7 @@ v1.12.0 已经实现：
 ### 主要工作
 
 - 为策略、指标算法、数据 schema、执行账本、交易日历和 replay 报告建立版本字段。
-- 统一 `README.md`、`README-en.md`、`DESIGN.md`、策略说明页和设置页中的 v1.12 事实。
+- 统一 `README.md`、`README-en.md`、`DESIGN.md`、策略说明页和看板页面中的 v1.12 事实。
 - 统一标注“5 分钟模拟诊断”“真实/代理双边覆盖率”“完整/部分交易日”“成本假设”和“非投资建议”。
 - 保留 v4/v5 报告只读能力；旧报告不补字段、不重算成新口径、不投影为真实业绩。
 - 定义“探索性诊断”和“验证结果”两种状态，以及后续阶段的进入门槛。
@@ -266,7 +266,7 @@ suggestedGrams     = floor(availableRiskBudget / riskPerGram)
 
 ### 涉及范围
 
-`lib/config.js`、`lib/sizing.js`、`lib/plan.js`、`lib/alerts.js`、`lib/store.js`、设置页客户端。
+`lib/config.js`、`lib/risk.js`、`lib/signal-ledger.js`、`lib/plan.js`、`lib/alerts.js`、`lib/store.js`、wire routes 与看板页面客户端。
 
 ### 产出
 
@@ -292,6 +292,8 @@ suggestedGrams     = floor(availableRiskBudget / riskPerGram)
 ---
 
 ## 阶段 3：ReplaySimulator 与长期验证
+
+> 实施状态：当前工作树已按[阶段 3 实施计划](stage-3-implementation-plan.md)完成框架、接线、测试与双语 UI；真实数据的 validation gate 仍按下述依赖 fail-closed，尚无“已验证策略”结论。
 
 ### 目标
 
@@ -384,6 +386,8 @@ replay.run({
 ---
 
 ## 阶段 4：策略实验层
+
+> 状态：当前工作树已完成。实现范围与兼容约束见 `docs/stage-4-implementation-plan.md`。统计/ML/DRL 与外部宏观因子在缺少 point-in-time 数据、训练产物和统一成本证据时只登记为 unavailable，不生成伪实验结果；live 默认仍固定为 control。
 
 ### 目标
 
@@ -483,7 +487,7 @@ strategy.evaluate({
 保持最终 factory-CJS 加载契约不变，在源码层抽出：
 
 - `GoldboardApi`：请求、错误信封、取消和重试；
-- `SettingsAdapter`：settingsScope 与 `/config` fallback；
+- `ConfigStore`：`/config`、revision 冲突和密钥脱敏；
 - `SnapshotStore`：轮询、可见性、离线和 snapshot 版本；
 - `ChartModel`：跨午夜交易日轴、缺口和质量；
 - `StatsViewModel`：v4/v5/OOS/成本/风险投影。
@@ -512,7 +516,7 @@ UI 清晰区分：
 - snapshot/models/replay-stats/client bundle 探针；
 - Chrome CDP 浏览器测试。
 
-浏览器测试覆盖浮窗、设置保存、统计详情、加载/离线/错误态、中文与 English 即时切换、明暗主题、窄屏布局、HMR 和卸载后的 CSS/事件清理。
+浏览器测试覆盖侧边栏入口、5 Tab、设置保存、统计详情、加载/离线/错误态、中文与 English 即时切换、明暗主题、窄屏布局、HMR 和卸载后的 CSS/事件清理。
 
 发布时核对：
 
@@ -601,9 +605,9 @@ v4/v5 报告继续只读；旧 state、旧 settings 和旧单边 bars 迁移必�
 
 ### 宿主与客户端
 
-覆盖统一错误 envelope、配置迁移、损坏存储、settings 只读、Webhook SSRF、取消、重启恢复、浮窗、设置、统计、双语、主题和窄屏布局。
+覆盖统一错误 envelope、配置迁移/损坏存储/revision 冲突、Webhook SSRF、取消、重启恢复、侧边栏页面、设置、统计、双语、主题和窄屏布局。
 
-每个阶段都必须保持当前 224 个测试通过，并为新增行为补充至少一个最小反例 fixture 和一个确定性重复运行测试。
+每个阶段都必须保持当前全量测试通过，并为新增行为补充至少一个最小反例 fixture 和一个确定性重复运行测试；测试数量随阶段实现增长，不把固定计数当作质量门槛。
 
 ## 6. 明确不做
 

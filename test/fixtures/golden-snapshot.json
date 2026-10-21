@@ -9,6 +9,7 @@
   "snapshot": {
     "ok": true,
     "dataSchemaVersion": "goldboard-market-data-v2",
+    "riskConfigVersion": "goldboard-risk-config-v1",
     "serverTime": "2026-03-13T03:30:00.000Z",
     "marketState": "open",
     "market": {
@@ -47,6 +48,67 @@
       }
     },
     "historical": null,
+    "risk": {
+      "riskPolicyVersion": "goldboard-risk-policy-v1",
+      "riskConfigVersion": "goldboard-risk-config-v1",
+      "mode": "fixed_grams",
+      "referenceEquityCny": 0,
+      "gate": {
+        "allowNewBuy": true,
+        "allowProtectiveExit": true,
+        "triggered": false,
+        "reasonCodes": []
+      },
+      "losses": {
+        "dailyLossCny": 0,
+        "weeklyLossCny": 0,
+        "drawdownCny": 0,
+        "unrealizedLossCny": 0
+      },
+      "adds": {
+        "today": 0,
+        "activeSetup": 0,
+        "consecutiveLosses": 0
+      },
+      "evidence": "local_advisory_ledger"
+    },
+    "ledger": {
+      "version": "goldboard-signal-ledger-v1",
+      "integrity": "ok",
+      "asOf": "2026-03-13T03:30:00.000Z",
+      "tradingDay": "2026-03-13",
+      "week": "2026-03-09",
+      "activeSetupId": null,
+      "activeSetupAdds": 0,
+      "activeSetupLastBuyPrice": null,
+      "addsToday": 0,
+      "lastBuyFillAt": null,
+      "consecutiveLosses": 0,
+      "totalRealizedPnlCny": 0,
+      "dailyRealizedPnlCny": 0,
+      "weeklyRealizedPnlCny": 0,
+      "dailyRealizedLossCny": 0,
+      "weeklyRealizedLossCny": 0,
+      "realizedDrawdownCny": 0,
+      "unrealizedLossCny": 0,
+      "dailyLossCny": 0,
+      "weeklyLossCny": 0,
+      "drawdownCny": 0,
+      "peakRealizedPnlCny": 0,
+      "lossIncludesUnrealized": true,
+      "riskEvidence": "local_advisory_ledger",
+      "counts": {
+        "setups": 0,
+        "decisions": 0,
+        "orders": 0,
+        "pending": 0,
+        "filled": 0,
+        "expired": 0,
+        "replaced": 0,
+        "notExecuted": 0,
+        "adjustments": 0
+      }
+    },
     "quotes": {
       "AU9999": {
         "price": 956.12,
@@ -2708,6 +2770,13 @@
         "recentHigh": 949.52,
         "recentLow": 942.42
       },
+      "indDaily": {
+        "close": 951.72,
+        "ema20": null,
+        "ema20Prev": null,
+        "rising": false,
+        "bars": 10
+      },
       "xauCnyPerGram": 955
     },
     "position": {
@@ -2758,6 +2827,10 @@
     },
     "plan": {
       "action": "sell_take_profit",
+      "strategyId": "control",
+      "strategyVersion": "goldboard-control-v1",
+      "signalSemantics": "state_condition",
+      "candidateAction": "sell_take_profit",
       "instrument": "CMB",
       "signalLane": "CMB",
       "signalPrice": 963.42,
@@ -2780,7 +2853,8 @@
           "estimatedSpreadAppliedPerGram": 0
         },
         "assumptions": [],
-        "executionVersion": "goldboard-execution-v2"
+        "executionVersion": "goldboard-execution-v2",
+        "feeIncluded": false
       },
       "reasonCodes": [
         "target_reached",
@@ -2989,6 +3063,23 @@
       "breakeven": 956.6,
       "targetPrice": 957.6,
       "stopPrice": 954.6,
+      "targetTrail": null,
+      "targetTrailLine": null,
+      "heldBars": 120,
+      "activeSignals": [
+        {
+          "code": "target_reached",
+          "action": "sell_take_profit",
+          "side": "sell"
+        },
+        {
+          "code": "target_band_reduce",
+          "action": "sell_take_profit",
+          "side": "sell"
+        }
+      ],
+      "suppressedSignals": [],
+      "risk": null,
       "suggestedOrder": {
         "action": "sell_take_profit",
         "instrument": "CMB",

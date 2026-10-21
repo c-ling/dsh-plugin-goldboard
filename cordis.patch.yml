@@ -1,0 +1,9 @@
+# Bundle layer for dsh-plugin-goldboard (DeepSeek Harness 0.2.1+).
+#
+# Installed as a bundle by `dsh plugin --profile <profile> add ...` or from the
+# Plugins page, this package contributes the row below. Profiles that install
+# the package manually as a plain dependency can add the same row to their own
+# cordis.patch.yml instead; do not do both.
+- insert:
+    - id: dsh-plugin-goldboard
+      name: 'dsh-plugin-goldboard'

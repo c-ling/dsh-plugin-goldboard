@@ -459,9 +459,12 @@ async function withPluginRoutes(configOverrides, run) {
         if (String(label ?? "").includes("route")) fn();
         return () => {};
       },
-      webServer: {
-        register: (route) => {
-          routes.push(route);
+      connection: {
+        fetch: {
+          register: (route) => {
+            routes.push(route);
+            return async () => {};
+          },
         },
       },
     };
@@ -474,7 +477,7 @@ async function withPluginRoutes(configOverrides, run) {
 
 test("a route handler exception answers with the 500 INTERNAL_ERROR envelope", async () => {
   await withPluginRoutes({}, async (routes, runtime) => {
-    const snapshotRoute = routes.find((route) => route.path === "/dsh-plugin-goldboard/snapshot");
+    const snapshotRoute = routes.find((route) => route.path === "/api/dsh-plugin-goldboard/snapshot");
     assert.ok(snapshotRoute);
     // Inject a failing dependency: any read of runtime.quotes throws before
     // the snapshot can be built. Without the wrapper the harness would answer
@@ -485,13 +488,9 @@ test("a route handler exception answers with the 500 INTERNAL_ERROR envelope", a
         throw new Error("boom-injected");
       },
     });
-    const res = resCapture();
-    await assert.doesNotReject(() => snapshotRoute.handler(
-      { method: "GET", url: "/dsh-plugin-goldboard/snapshot", headers: {} },
-      res,
-    ));
-    assert.equal(res.status, 500);
-    const body = JSON.parse(res.body);
+    const response = await snapshotRoute.fetch(new Request("http://local/api/dsh-plugin-goldboard/snapshot"));
+    assert.equal(response.status, 500);
+    const body = await response.json();
     assert.equal(body.ok, false);
     assert.equal(body.error.code, "INTERNAL_ERROR");
     assert.match(body.error.message, /boom-injected/);
@@ -534,27 +533,30 @@ test("POST /config keeps sibling channels on a partial payload and 400s on unkno
   await withPluginRoutes({
     webhooks: { dingtalk: { enabled: true, url: "https://ding.example/hook" } },
   }, async (routes) => {
-    const configRoute = routes.find((route) => route.path === "/dsh-plugin-goldboard/config");
+    const configRoute = routes.find((route) => route.path === "/api/dsh-plugin-goldboard/config");
     assert.ok(configRoute);
 
-    const partialRes = resCapture();
-    await configRoute.handler(bufferReq("POST", { config: { webhooks: { feishu: { enabled: true } } } }), partialRes);
+    const post = (body) => configRoute.fetch(new Request("http://local/api/dsh-plugin-goldboard/config", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+
+    const partialRes = await post({ config: { webhooks: { feishu: { enabled: true } } } });
     assert.equal(partialRes.status, 200);
-    const partialBody = JSON.parse(partialRes.body);
+    const partialBody = await partialRes.json();
     assert.equal(partialBody.ok, true);
     assert.equal(partialBody.config.webhooks.feishu.enabled, true);
     assert.equal(partialBody.config.webhooks.dingtalk.enabled, true, "dingtalk survives the partial write");
     assert.equal(partialBody.config.webhooks.dingtalk.url, "https://ding.example/hook");
 
-    const unknownRes = resCapture();
-    await configRoute.handler(bufferReq("POST", { config: { notASection: true } }), unknownRes);
+    const unknownRes = await post({ config: { notASection: true } });
     assert.equal(unknownRes.status, 400);
-    assert.equal(JSON.parse(unknownRes.body).error.code, "UNKNOWN_CONFIG_KEY");
+    assert.equal((await unknownRes.json()).error.code, "UNKNOWN_CONFIG_KEY");
 
-    const getRes = resCapture();
-    await configRoute.handler({ method: "GET", headers: {} }, getRes);
+    const getRes = await configRoute.fetch(new Request("http://local/api/dsh-plugin-goldboard/config"));
     assert.equal(getRes.status, 200);
-    assert.equal(JSON.parse(getRes.body).config.strategy.weaknessRsi, 75, "new strategy defaults exposed");
+    assert.equal((await getRes.json()).config.strategy.weaknessRsi, 75, "new strategy defaults exposed");
   });
 });
 

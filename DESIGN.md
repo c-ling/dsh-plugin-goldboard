@@ -1,8 +1,8 @@
-# dsh-plugin-goldboard — 设计文档（v1.14.0 当前实现）
+# dsh-plugin-goldboard — 设计文档（v1.15.0 当前实现 + 0.2.1 侧边栏页面重构）
 
-> 状态：v1.13.0 是阶段 0 baseline；v1.14.0 完成阶段 1 数据与执行事实层，升级 market data/execution/state schema、独立日历、长期双边历史与公共接口，但不调整 control 策略。长期样本外验证、风险预算和真实成交回填仍未实现。
-> 证据定位：当前 replay report 明确是探索性诊断，不是实际成交或已验证策略的业绩证明。
-> 目标环境：DeepSeek Harness Web GUI，本地 `link:` 安装到 `web` profile。
+> 状态：v1.13.0 是阶段 0 baseline；v1.14.0 完成阶段 1 数据与执行事实层。v1.15.0 已发布阶段 2 风险闸门/订单生命周期、阶段 3 ReplaySimulator/长期验证框架、阶段 4 策略实验层和 0.2.1 侧边栏页面重构：移除浮窗与 Settings 页面，改为 `sidebar.panellist` + `main` 独立页面；Host 路由进入 `/api`，配置回到插件私有 `config.json`。control 策略参数保持不变，真实账户同步和真实成交回填仍未实现。
+> 证据定位：report v6 与独立 experiment report v1 均由 Host 根据数据集、OOS、成本、基准、消融和区间事实推导证据状态。当前真实历史、XAU/USDCNY 点时联合数据与费用核验不足，因此仍明确为探索性诊断；候选报告不会修改 live control，也不是实际成交或已验证策略的业绩证明。
+> 目标环境：DeepSeek Harness 0.2.1+（Web 与 Desktop）；本地 `link:` 安装到 `web` / `desktop` profile。
 > 插件形态：双面 Cordis 包（Node 宿主半 + 手写 factory-CJS 浏览器半），无构建步骤。
 
 ---
@@ -30,18 +30,17 @@
 
 ### 2.1 v1 必须做
 
-- 页面内轻量浮窗看板：
-  - 默认位置**右上角**，可拖拽并记住位置；可收起为**小圆球**，点击展开。
-  - 折叠态：国内金价（Au99.99，元/克）+ 国际金价（XAU，美元/盎司），涨跌与更新时间。
-  - 展开态小卡：Au99.99 1 分钟趋势线（SVG）、国际价折算元/克、内外价差、招行积存金实时客户买卖价（接口不可用时为国际金价按汇率折算 + 固定价差估算，点击可看折线图）、当前信号摘要。
-  - 不弹窗、不抢焦点；提醒由系统通知/Webhook 负责，不在页面内制造弹层。
-- 设置页（`settings.section`）：
-  - 持仓：当前克数、平均成本（元/克）。
-  - 上限：最大投入克数。
-  - 成本：报价外显式买入/卖出费、synthetic fallback 估算点差与滑点分别配置和列账；默认显式费用为买入 0 + 卖出 5 元/克。
-  - 招行积存金备用价差：买入价差、卖出价差默认各 +1.72 元/克，可分别调整；仅当招行接口不可用时用于估算。
-  - 信号阈值、交易时段（工作日 09:00–次日 02:00，节假日表可编辑）。
-  - 系统通知开关、Webhook 渠道配置（密钥只写、读回脱敏）。
+- 侧边栏入口 + 独立主面板页面（`sidebar.panellist` + `main` key `goldboard`）：
+  - 页面用 6 个 Tab：概览、交易、策略与回放、分析、数据、设置；最后访问的 Tab 记入 `sessionStorage`。
+  - 页头与 Tab 栏固定，只有 Tab 内容区滚动；每个可配置 Tab 有独立保存按钮，只提交本 Tab 的配置节。
+  - 概览：行情卡、今日走势（SVG）、当前建议、持仓/风险、数据质量；点击行情卡切换图表品种。
+  - 策略与回放：回放统计、策略实验、信号账本；详情用弹窗。
+  - 分析：模型配置、立即分析、查询日志。
+  - 数据：数据源健康、历史覆盖、招行积存金分钟补录。
+  - 交易：持仓/上限、风险预算、费用/价差、手动昨收、策略参数、交易时段；顶部独立保存条。
+  - 设置：系统通知与 Webhook；独立保存条。
+  - 每个可配置 Tab 有独立保存按钮，只提交本 Tab 的配置节；保存带 `expectedRevision` 冲突保护；离开页面丢弃未保存草稿（页内提示）。
+  - 不注册 `shell.overlay` / `settings.section`；详情弹窗由页面触发。
 - 策略输出：
   - 无持仓时：建议买入价（信号价 + 对应招行估算价）、建议克数、理由标签（技术指标状态）。
   - 持仓时：回本价、建议卖出价、止损参考价、当前浮盈亏（扣费后）。
@@ -73,34 +72,34 @@
 | host plugin `name` | `dsh-plugin-goldboard` |
 | locale namespace | `dsh-plugin-goldboard` |
 | storage | `$DSH_HOME/storages/dsh-plugin-goldboard/` |
-| 路由前缀 | `/dsh-plugin-goldboard/*` |
-| profile loader | `- insert: { id: dsh-plugin-goldboard, name: 'dsh-plugin-goldboard' }` |
-| 宿主依赖 | `inject: ["webServer", "llm"]` |
-| 浏览器 runtime 依赖 | client exports `inject: ["slots", "locale", "connection", "remote", "settingsScope"]`；`package.json#dsh.client.inject: []` 是“其他 client bundle”图边，不是 runtime service 列表，保持为空 |
+| 路由前缀 | `/api/dsh-plugin-goldboard/*`（`ctx.connection.fetch`） |
+| profile loader | bundle：`dsh.bundle.patch` + `cordis.patch.yml`；手动模式才手写 `- insert: { id: dsh-plugin-goldboard, name: 'dsh-plugin-goldboard' }` |
+| 宿主依赖 | `inject: ["connection", "llm"]` |
+| 浏览器 runtime 依赖 | client exports `inject: ["slots", "locale"]`；`package.json#dsh.client.inject: []` 是“其他 client bundle”图边，不是 runtime service 列表，保持为空 |
 
 ---
 
 ## 4. 总体架构
 
 ```
-┌──────────── 浏览器半（lib/client.js 单文件内重构，plan-05 B 部分）─────────────┐
+┌──────────── 浏览器半（lib/client.js 单文件，0.2.1 侧边栏页面）────────────────┐
 │                                                                              │
-│  shell.overlay（list / root scope）                                          │
-│    GoldBoardOverlay：右上角可拖拽；收起为小圆球 ⇄ 展开浮窗卡                     │
-│    - 国内/国际价、涨跌、更新时间、折算价、内外价差、招行积存金估算价               │
-│    - SVG 近期走势 sparkline                                                   │
-│    - 当前信号：买入建议 / 卖出建议 / 回本价 / 建议委托单 + 一键复制               │
+│  sidebar.panellist（list / root scope）                                      │
+│    GoldBoardIcon：内联 SVG，id "goldboard"，order 20                          │
 │                                                                              │
-│  settings.section                                                             │
-│    GoldBoardSettings：持仓、上限、手续费（买0卖5）、招行价差、信号阈值、          │
-│    交易时段（工作日 09:00–次日02:00，节假日表）、提醒渠道                       │
-│    模型与分析：Harness provider/model/reasoning、立即分析、查询日志             │
+│  main（keyed / root scope，key "goldboard"）                                  │
+│    GoldBoardPage：页头 / 5 Tab / 全局保存条 / 错误边界                         │
+│      overview：行情卡、今日走势、当前建议、持仓/风险、数据质量                  │
+│      strategy：replay-stats、策略实验、信号账本 + 详情弹窗                     │
+│      analysis：模型配置、立即分析、查询日志                                    │
+│      data：数据源健康、历史覆盖、手动 CMB 补录                                 │
+│      trading：持仓/风险/费用/价差/策略/时段；settings：侧边栏金价/通知/Webhook │
 │                                                                              │
-│  轮询 GET /dsh-plugin-goldboard/snapshot（10s 报价，60s K 线；页面隐藏时降频） │
-│  GET /models、POST /analysis、GET /analysis-logs（模型调用与审计日志）          │
+│  GET /api/dsh-plugin-goldboard/snapshot（10s；隐藏 60s）                      │
+│  /config（revision）、/ledger、/models、/analysis、/analysis-logs、/data-sources│
 │  语言切换：locale.register(NS, { zh, en })，所有可见文案走 t()                  │
 └──────────────────────────────────┬───────────────────────────────────────────┘
-                                   │ HTTP（webServer，同源）
+                                   │ HTTP（/api，connection 认证桥）
 ┌──────────────────────────────────▼───────────────────────────────────────────┐
 │                     宿主半（plan-05 模块拆分，index.js 为组合根）                │
 │                                                                              │
@@ -117,6 +116,8 @@
 │                      只用收盘 K 线，输出 calculationVersion/warmupReady         │
 │  lib/bars.js         bar 生命周期：recordTick/merge/aggregate/种子迁移/手工 CMB  │
 │  lib/sizing.js       仓位分档、建议单工厂（三处字面量合一）、确认/冷却策略        │
+│  lib/risk.js         RiskPolicy：每克风险事实、预算 sizing、只阻断新增买入的闸门  │
+│  lib/signal-ledger.js setup/decision/order/adjustment 幂等 reducer 与只读投影     │
 │  lib/spread-stats.js 动态招行价差样本 + 内外盘溢价 σ 统计                        │
 │  lib/plan.js         computePlan 四阶段流水线（选道→指标→持仓分支→空仓分支）；      │
 │                      5/10 分钟覆盖率 >80%、30/60 分钟 >60% 才出建议              │
@@ -128,22 +129,30 @@
 │  lib/routes.js       route() 助手（方法分发/405/413/错误信封）+ 全部路径表        │
 │  lib/store.js        原子写队列、分区脏标记 StatePersister、ApiLogStore           │
 │  lib/config.js       默认值/归一化/密钥脱敏/补丁合并 + plan-04 设置 schema        │
+│  lib/strategy*.js    策略契约/注册表/control adapter/ORB 状态机与隔离实验 runner │
+│  lib/factor-contract.js / market-regime.js  点时因子契约与可解释市场状态         │
 │                                                                              │
 │  持久化：$DSH_HOME/storages/dsh-plugin-goldboard/{config,state}.json           │
 │            + history/*.jsonl（CMB 双边）+ api-log/alerts/analysis logs           │
+│            + replay-reports/ + strategy-experiment.json                        │
 │            + state migration backup / SHA-256 manifest                         │
 │                                                                              │
 │  路由（每个路径注册一次，内部按 method 分发）：                                  │
-│    GET/POST /dsh-plugin-goldboard/config                                      │
-│    GET      /dsh-plugin-goldboard/models                                      │
-│    GET/POST /dsh-plugin-goldboard/analysis                                    │
-│    GET      /dsh-plugin-goldboard/analysis-logs                               │
-│    GET      /dsh-plugin-goldboard/snapshot                                    │
-│    GET      /dsh-plugin-goldboard/bars?instrument=&interval=&limit=            │
-│    POST     /dsh-plugin-goldboard/replay                                      │
-│    GET      /dsh-plugin-goldboard/manual-cmb-missing                          │
-│    POST     /dsh-plugin-goldboard/manual-cmb-bars                             │
-│    POST     /dsh-plugin-goldboard/test-notify                                 │
+│    GET/POST /api/dsh-plugin-goldboard/config                                      │
+│    GET      /api/dsh-plugin-goldboard/models                                      │
+│    GET/POST /api/dsh-plugin-goldboard/analysis                                    │
+│    GET      /api/dsh-plugin-goldboard/analysis-logs                               │
+│    GET      /api/dsh-plugin-goldboard/snapshot                                    │
+│    GET      /api/dsh-plugin-goldboard/bars?instrument=&interval=&limit=            │
+│    POST     /api/dsh-plugin-goldboard/replay                                      │
+│    GET/POST /api/dsh-plugin-goldboard/replay-stats                                │
+│    GET      /api/dsh-plugin-goldboard/replay-reports                              │
+│    GET      /api/dsh-plugin-goldboard/strategies                                  │
+│    GET/POST /api/dsh-plugin-goldboard/strategy-experiments                        │
+│    GET      /api/dsh-plugin-goldboard/manual-cmb-missing                          │
+│    POST     /api/dsh-plugin-goldboard/manual-cmb-bars                             │
+│    POST     /api/dsh-plugin-goldboard/test-notify                                 │
+│    POST     /api/dsh-plugin-goldboard/system-settings                             │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -183,13 +192,13 @@
 
 ### 5.3 客户端设置
 
-客户端继续使用独立 `settings.section`，不改为 `settings.plugin.item`。模型选择保存在插件配置中，不读写 Harness 全局会话模型；查询日志使用独立对话框，支持状态/provider/model/时间筛选、游标分页、详情复制、Escape 关闭和中英文即时切换。
+客户端使用侧边栏 `sidebar.panellist` 入口与 `main` 独立页面；模型选择保存在插件配置中，不读写 Harness 全局会话模型。查询日志、回放详情、信号账本仍使用独立对话框，支持筛选/分页/复制、Escape 关闭和中英文即时切换。
 
 ### 5.4 阶段 1 事实层接口
 
 - `getTradingCalendar()` 分别提供 CMB reminder v2、SGE day/night v1 和 XAU 24x5 v1；CMB 用户配置不再过滤 SGE/XAU 历史。snapshot 和 replay 保存实际 lane 的 `calendarVersion`。
 - `HistoricalStore` 按 CMB 交易日追加 JSONL，稳定 event ID 去重、跨实例锁定、as-of 查询；尾部撕裂截断后继续写，中部损坏只隔离对应分区。热 bars 仍双写 `state.json`，便于旧版本回滚。
-- state schema v2 首次迁移前保存原字节备份和 SHA-256 manifest；内容不同的二次迁移生成独立备份，`rollbackStateMigration()` 恢复 manifest 指向的确切文件。
+- state schema v3 首次迁移前保存 v1/v2 原字节备份和 SHA-256 manifest；内容不同的二次迁移生成独立备份，`rollbackStateMigration()` 恢复 manifest 指向的确切文件。
 - `ExecutionModel` v2 是 quote/bar/account/value 的成本 seam。部分 live quote 返回 ask/bid 缺侧 reason code；历史 proxy 只有调用方显式 `allowProxy` 才可投影，且 assumptions 随结果和 report 输出。
 - 根入口不再暴露 parser、可变 bar helper、存储原语或全局 fetch hook；稳定子入口为 `./market-data`、`./execution`、`./history`、`./replay`，内部测试面为 `./testing`。
 
@@ -246,9 +255,9 @@
 
 ### 6.4 交易时段与市场状态
 
-- 交易时段按**招商银行积存金**（北京时间，可在设置页编辑）：
+- 交易时段按**招商银行积存金**（北京时间，可在交易 Tab 编辑）：
   - 每周一至周五 09:00–次日 02:00 为可交易时段（周五 09:00 开启的时段延续到周六 02:00 结束）。
-  - 周六、周日不开启新时段；法定节假日休市（设置页提供节假日表编辑，v1 默认空表，后续可内置中国法定节假日）。
+  - 周六、周日不开启新时段；法定节假日休市（交易 Tab 提供节假日表编辑，v1 默认空表，后续可内置中国法定节假日）。
   - 实际执行以招行 App 交易规则为准；插件时段表只是提醒开关，不代替银行规则。
 - `marketState` 仍代表 CMB 提醒/执行闸门；行情采集和 replay 则按品种日历：SGE/Au99.99 为北京时间 09:00-11:30、13:30-15:30、20:00-次日 02:30，XAU/USD 为独立 UTC 24x5 template。三者版本分别写入 snapshot/report；未知品种使用 closed adapter，不静默套用 CMB。
 - `marketState` 写入 snapshot：`open / closed`；`open` 表示招行积存金当前可交易。
@@ -287,12 +296,13 @@ pnl = sellProceeds - buyCost
 - 真实 CMB 客户双边报价直接成为 ask/bid；`estimatedSpreadPerGram` 不再叠加到真实双边价。
 - 缺少双边价时，reference + `cmb.buy/sellSpreadPerGram` 生成 synthetic ask/bid；估算点差只在该路径建立最小双边距离，并在 `components` 中披露。
 - 配置的 `fee.buy/sellPerGram` 明确定义为报价外显式费用，`slippagePerGram` 按买卖各自记账。默认仍为买入 0、卖出 5、滑点 0.2；该业务语义必须由用户按产品协议核对。
+- opt-in `cmb.deriveSellFromFee=true`：卖出价改为 `executableAsk − fee.sellPerGram`，实时卖出价只用于偏离提示；execution quote 标记 `feeIncluded` 与 `evidence=proxy`，执行/风控/账本/回放的卖出费因此只记一次。派生卖出价与实时卖出价偏离 ≥0.5 元/克时 plan 附 `configured_spread_drift`，但不阻断交易。默认关闭，保持上一行语义。
 - 持仓估值只依赖持仓和新鲜 executable bid，不依赖技术指标门控。不可估值时返回 `feeAdjustedPnl:null + valuationReasonCode`，绝不补 0。
 - 止损直接比较 `effectivePnlPerGram <= -maxLossPerGram`；展示阈值由同一 module 推导，避免手续费符号反转。
 - 动态 fallback 校准按分钟分别持久化 `buyOffset = customerBuy-reference` 与 `sellOffset = customerSell-reference`；30 个新鲜样本后分别取中位数。v1.10 的 `spreadMid` 样本继续可读，但 `spreadSource=dynamic-legacy`。
 - 新采集 CMB bar 保存 ask/bid OHLC；旧单边 bar 继续保留原始身份，replay 只能标记为 proxy，不能视为真实双边历史。
 
-### 7.3 信号规则（默认参数全部可在设置页调整）
+### 7.3 信号规则（默认参数全部可在交易 Tab 调整）
 
 **数据完整性门槛（所有建议共用，v1.1）**
 
@@ -332,6 +342,18 @@ pnl = sellProceeds - buyCost
 - 建议克数按最大克数的轻仓 20% / 标准仓 60% / 上限分档推进，单次最多增加上限的 10%（至少 1 克）
 - 目标卖出价（招行口径）= `max(breakevenBid + 最小利润, 近20高点 - atrFactor×ATR + sellOffset)`
 
+**阶段 2 风险预算与买入闸门**
+
+- `risk.mode = fixed_grams` 是兼容默认：先按上述目标仓位分档得出克数，再与所有正数约束取最小值；全部新增约束为 0 时输出与 v1.14 相同。
+- `risk.mode = budget` 只在用户显式选择后生效，且至少需要一个现金风险预算。每克最坏风险口径固定为：
+  `stopDistance = max(ATR(5m) × volatilityTarget, executableAsk - executableBid, 双边滑点)`；
+  `riskPerGram = stopDistance + quotedSpread + 双边显式费用 + 双边滑点`。
+- 最终克数向下取整到 0.01 克，并同时满足 `limits.maxGrams`、`maxAmountCny`、`maxRiskPerTradeCny`、日/周损失剩余额度、回撤剩余额度与 `liquidityCapGrams`。ATR、点差、滑点或费用单调上升时，其他输入不变的建议克数不得增加。
+- 日/周损失按北京时间切分，累计本地建议单经 `user_position_confirmation` 确认的负 PnL 绝对值并加当前负浮盈亏，后续盈利不恢复已消耗预算；drawdown 由估算累计净损益峰值加当前负浮盈亏计算。该证据固定标记为 `local_advisory_ledger`，不称为账户流水。
+- `maxAddsPerSetup`、`maxAddsPerDay`、`minAddPriceImprovementPerGram` 和成交后 cooldown 只限制新增买入。连续亏损达到 `consecutiveLossDeRisk` 时按确定性 1/2 档位缩量。
+- 风险策略只裁决 buy candidate；`sell_stop`、`sell_trailing`、`sell_weakness`、止盈和收盘退出等卖出路径不读取 buy gate，始终保留保护性退出能力。
+- 闸门触发时保留 `candidateAction`、`activeSignals/suppressedSignals` 与 decision 风险快照，最终 `suggestedOrder = null`；不得创建虚假 order/fill。
+
 **持仓中**
 
 任一条件触发：
@@ -343,6 +365,17 @@ pnl = sellProceeds - buyCost
 | 统一账本的 `effectivePnlPerGram <= -maxLossPerGram` | `sell_stop`：止损参考价 |
 | 距当日交易时段结束 < 30 分钟仍持仓 **且 `strategy.closeBySessionEnd` 开启** | `close_by_session_end`：日内了结提醒（不自动计算价格）。**v1.9.0 起默认关闭**——不固定倾向于日内了结，关闭时最后半小时继续走止盈/移动止盈/止损/走弱的常规信号链 |
 | RSI14 > 75 且 5 分钟出现阴线吞没/上影 > ATR | `sell_weakness`：减仓参考 |
+| 持仓满 `maxBarsBeforeTarget` 根 5m 仍未触目标（opt-in） | `sell_time_stop`：武装前时间止损，清仓 |
+
+**目标回撤止盈与 60 分钟趋势闸门（当前工作树，opt-in，默认关闭）**
+
+- `strategy.targetTrailPerGram = 0` 保持旧行为：`bid ≥ target` 立即 `sell_take_profit`。
+- 开启后（>0），触达目标只把持仓置为 armed 并记录 `peakBid`，不卖出；卖出线 = `max(targetBid, peakBid) − targetTrailPerGram`。`bid ≤ 卖出线` 输出 `sell_target_trail`（清仓）；`targetPartialRatio > 0` 时首触目标先卖该比例，剩余继续跟踪；`targetTrailBars > 0` 时，连续 N 根已收盘 5 分钟 K 线未创新高也输出 `sell_target_trail`。
+- 状态持久化在 `signalState.targetTrail`，以 `instrument|avgCost` 为签名：加仓改变成本即重置，清仓清除；仅部分卖出不会重置。
+- `sell_target_trail` 属于 emergency：绕过同向冷却与 confirmBars。同时开启回撤止盈时，`reduce_position` / `sell_trailing` / `sell_weakness` 三条自由裁量退出被跳过，退出策略收敛为「止损 / 收盘 / 目标回撤」，避免它们在目标前把仓位卖掉。
+- `strategy.requirePriceAboveEma60 = true` 时，`trendUp` 额外要求 `technicalPrice > ind60.ema20`；默认关闭，只影响 buy_setup/add_position，不影响任何卖出路径。
+- `strategy.requireDailyUptrend = true` 时，`trendUp` 还要求最近一根**已收盘**日线的收盘价高于日线 EMA20、且该 EMA20 上行；日线不足时 fail closed。当前未收盘日线被排除，禁止用当日不完整收盘判定。
+- `strategy.maxBarsBeforeTarget > 0` 时启用**武装前时间止损**：以最早未平仓 lot 的 `time` 起算，持仓满 N 根已收盘 5m K 线仍未触及目标（且未被回撤止盈武装）则输出 `sell_time_stop` 清仓。它与 `targetTrailBars` 的“武装后超时”是两套规则；lot 时间缺失时该规则不生效。`sell_time_stop` 属于 emergency。
 
 **sell_weakness（v1.5.0 实现，持仓减仓参考，不要求浮盈）**
 
@@ -375,9 +408,17 @@ pnl = sellProceeds - buyCost
   "action": "buy_setup | sell_take_profit | sell_trailing | sell_stop | ...",
   "instrument": "Au99.99",
   "side": "buy | sell",
+  "setupId": "setup-…",
+  "decisionId": "decision-…",
+  "orderId": "order-…",
   "signalPrice": 948.60,
   "cmbEstimatedPrice": 950.60,
   "grams": 20.00,
+  "nominalAmountCny": 19012.00,
+  "stopDistancePerGram": 5.00,
+  "riskPerGram": 10.40,
+  "worstCaseLossCny": 208.00,
+  "riskBudgetRatio": 0.0104,
   "validUntil": "2026-08-15T01:50:00+08:00",
   "reasonCodes": ["trend_ema20_up", "rsi_rebound", "near_support"],
   "riskNote": "技术面参考，非投资建议"
@@ -386,7 +427,15 @@ pnl = sellProceeds - buyCost
 
 - `validUntil` 取当前招行交易时段结束前 10 分钟，超时后建议自动失效。
 - 浏览器侧提供“一键复制委托文本”，文本中明确写“招行积存金估算价，以 App 实际报价为准”，不执行任何下单动作。
-- 宿主会记住最近一次已提醒的 `suggestedOrder`（持久化到 `state.json`，含 `issuedAt` / `issuedPositionGrams` 出厂戳）。**v1.9.0 生命周期语义（`classifyOrderTransition`）**：建议后的同方向冷却转观望、连续确认中或数据类状态只代表「挂单监控中」，不再触发撤单提醒；仅当出现实质性变化才升级——方向相反的新信号或同向替代建议（`cancel_order`）、现价偏离原挂单价 ≥ `strategy.orderRepricePct`%（默认 0.5，可调）（`cancel_order` + 偏离附注）、价格/克数实质变化 ≥ 0.5 元/克（`order_updated`，微小重报静默刷新有效期）；仓位朝建议方向变化视为已成交、到期与休市则静默清除跟踪。**同形改价风暴降噪（v1.9.0）**：价格/克数不变、仅建议价漂移 ≥0.5 元/克的同形更新，在距上次提醒不足 `ORDER_UPDATE_MIN_INTERVAL_MS`（10 分钟）内静默刷新（保留 `updatedAt`/`alertedPrice` 戳）；只有相对「最近一次已通知价」累计漂移 ≥ `ORDER_UPDATE_ESCALATION_DELTA_PER_GRAM`（3 元/克）才立即穿透提醒。实测背景：2026-08-25 01:44-02:00 招行卖价每 tick 抖动越阶，16 分钟连发 ~35 条 `order_updated`。无戳的旧版存量订单行为不变（照常提醒），首次盖章后生效。
+- 宿主会记住最近一次已提醒的 `suggestedOrder`（持久化到 `state.json`，含 `issuedAt` / `issuedPositionGrams` 出厂戳）。阶段 2 同时在 `signalLedger` 保留有界历史，并将同一 transition 写为 pending/filled/expired/replaced；受阻断 candidate 只产生 `not_executed` decision。**v1.9.0 生命周期语义（`classifyOrderTransition`）**：建议后的同方向冷却转观望、连续确认中或数据类状态只代表「挂单监控中」，不再触发撤单提醒；仅当出现实质性变化才升级——方向相反的新信号或同向替代建议（`cancel_order`）、现价偏离原挂单价 ≥ `strategy.orderRepricePct`%（默认 0.5，设为 0 关闭）（`cancel_order` + 偏离附注）、价格/克数实质变化 ≥ 0.5 元/克（`order_updated`，微小重报静默刷新有效期）；仓位朝建议方向变化视为已成交、到期与休市则静默清除跟踪。**同形改价风暴降噪（v1.9.0）**：价格/克数不变、仅建议价漂移 ≥0.5 元/克的同形更新，在距上次提醒不足 `ORDER_UPDATE_MIN_INTERVAL_MS`（10 分钟）内静默刷新（保留 `updatedAt`/`alertedPrice` 戳）；只有相对「最近一次已通知价」累计漂移 ≥ `ORDER_UPDATE_ESCALATION_DELTA_PER_GRAM`（3 元/克）才立即穿透提醒。实测背景：2026-08-25 01:44-02:00 招行卖价每 tick 抖动越阶，16 分钟连发 ~35 条 `order_updated`。无戳的旧版存量订单行为不变（照常提醒），首次盖章后生效。
+
+**阶段 2 setup/signal/order ledger**
+
+- 连续满足同方向、同 instrument 条件时复用一个 `setupId`；条件结束、lane/方向改变时关闭旧 setup。价格漂移和重复轮询不会创建新 setup。
+- `decisionId` 的幂等 fingerprint 包含 setup、已收盘信号 K、candidate/final action、仓位和阻断原因；同一 K 的重复 poll 不增长 decision/order 数组。
+- decision 保存 active/suppressed signals、当时仓位、建议规模、名义金额、可用风险预算和阻断原因。闸门触发时 status 为 `not_executed` 且 `orderId = null`。
+- order 保存 pending → filled/expired/replaced 轨迹。持仓变化只在方向与唯一 pending 建议匹配且覆盖建议克数时标记 `filled`，证据为 `user_position_confirmation`；部分/不唯一/无 pending 的变化只写 `manual_position_adjustment`，不伪造银行成交。
+- 用户确认的卖出可按建议价、出厂成本、费用与滑点计算 `realizedPnlCny` 估算；缺事实返回 null，不补零。ledger 数组有界，策略与回放 Tab 和 `GET /ledger` 提供只读查询。
 
 ### 7.5 提醒边沿触发（无冷却、无勿扰）
 
@@ -397,9 +446,9 @@ pnl = sellProceeds - buyCost
 - 除常规买卖信号外，还额外跟踪最近一次委托建议；按 §7.4 的 v1.9.0 生命周期语义，仅在冲突/漂移/实质更新时以 `cancel_order` / `order_updated` 边沿提醒，观望与数据缺口保持静默监控。
 - **连续确认与冷却语义**：`strategy.confirmBars = N` 表示方向条件需在连续 N 根已收盘 5 分钟 bar 上成立；同一 bar 的重复轮询不重复计数。动作离开方向集、信号道切换、休市或仓位变化会清空 streak。v1.11.0 起仓位变化不再清空 `lastSide/lastAt`，同一 setup 成交后仍受同向冷却约束。
 
-### 7.6 回放诊断口径与局限（v1.14.0，report v5）
+### 7.6 历史回放兼容口径（v1.14.0，report v5）
 
-只读分析功能，不发提醒、不调模型、不修改真实持仓。v5 把策略决策与订单成交分开：
+以下是仍受支持的 v5 只读口径，不发提醒、不调模型、不修改真实持仓。v5 首次把策略决策与订单成交分开：
 
 - **统计宇宙**：`lane:"cmb"` 默认使用本机持久化 CMB 序列，`lane:"au9999"` 使用东财历史。新 CMB bar 有真实 ask/bid OHLC 时直接使用；旧单边 bar 只可按固定 5 元/克差生成 proxy bid，`realBidAskCoverage` 不计为真实。
 - **完整时段**：默认枚举最近 N 个已过配置收盘时点的交易日；数据没有到达配置时段尾部则标记 partial 并排除。只有显式 `includePartial:true` 才按截至时点单列，不进入 `sessionEnd*` 指标。
@@ -411,7 +460,7 @@ pnl = sellProceeds - buyCost
 - **兼容**：v4 落盘报告继续原样读取，但客户端显示“旧执行假设，不可与 v5 比较”，且不把 v4 overall/命中率投影成 v5 卡片。
 - **缓存**：键包含窗口、车道、策略/费用、execution/fill/ambiguity policy、partial 与 executable-bid 开关；同键缓存 1 小时。
 
-**已知局限（报告 `caveats` 数组如实携带，设置页展示）**
+**已知局限（报告 `caveats` 数组如实携带，策略与回放 Tab 展示）**
 
 | caveat | 说明 |
 | --- | --- |
@@ -448,19 +497,50 @@ pnl = sellProceeds - buyCost
 
 阶段 0 的兼容规则是 additive：v4 和阶段 0 之前生成的 v5 文件经 `GET /replay-stats` 原样只读返回，不迁移、不补字段、不重算；客户端只显示它们已有的安全元数据和 legacy/不可用提示，不把缺失字段补成阶段 0 基线，也不把结果提升为真实业绩。`past-performance-advisory` 与 `two-simulated-passes` caveat 必须随新 report 保留。
 
-**阶段 0 文档/前端口径差异清单**：历史 v4/v5 文件没有新增 provenance 时只显示旧执行/元数据不可用；新 v5 report 显示完整 provenance、探索性状态、成本假设和 real/proxy/unknown 覆盖；README 与设置页均将这些数值称为 5 分钟模拟诊断，而不是实际业绩；v1.11.0 说明页保留历史实现并链接当前基线。
+**阶段 0 文档/前端口径差异清单**：历史 v4/v5 文件没有新增 provenance 时只显示旧执行/元数据不可用；新 v5 report 显示完整 provenance、探索性状态、成本假设和 real/proxy/unknown 覆盖；README 与页面均将这些数值称为 5 分钟模拟诊断，而不是实际业绩；v1.11.0 说明页保留历史实现并链接当前基线。
+
+### 7.8 阶段 3 ReplaySimulator 与 report v6
+
+阶段 3 把现有回放拆成五个可独立测试的深模块：
+
+- `replay-simulator.js`：`ReplaySimulator.run({ frames, strategy, execution, initialPortfolio, fillPolicy, ambiguityPolicy, asOf, params })`。模拟器按时间排序/去重完整 frame，先处理旧 pending，再调用 `strategy.evaluate`；它独占 fill、expiry、replacement、ledger 和 mark，不复制策略或成本公式。
+- `replay-dataset.js`：把 `HistoricalStore.query(..., asOf)` 的 CMB quote 聚合为自然 5m/60m ask/bid OHLC；source timestamp 与 `ingestedAt` 必须同时不晚于 as-of，并在聚合前用同一 calendar adapter 排除休市记录。manifest 同时保存 durable partition hash 与 selected-subset hash、schema/calendar/source 版本、证据计数、时间完整/执行侧完整 bars/session、排除计数、历史跨度和 dataset fingerprint。
+- `walk-forward.js`：按 UTC 月边界注册 6 个月训练 + 1 个月测试、逐月滚动的 fold；train/test 使用半开区间且不重叠，每个月至少 10 个时间/执行侧均完整的 session 才为 ready。测试月账户以零仓、无 pending、独立初始资金和新策略状态开始，训练期只提供冻结参数选择，指标 context 仍可读取测试时点以前的已收盘 bars。每折保存参数、候选空间、尝试数、样本数、区间和 result fingerprint，registry result fingerprint 绑定完整 fold 顺序/结果；control 参数不在本阶段寻优。
+- `replay-report.js`：唯一 report v6 projector，生成 input/report SHA-256、暴露时间、资金使用率、turnover、profit factor、Sharpe/Sortino/Calmar、Wilson 95% 胜率区间和 seeded moving-block bootstrap 收益区间；四个基准通过同一 execution adapter 使用可执行 ask/bid、显式费与滑点。
+- `replay-store.js`：`replay-reports/` 下的不可变报告文件与原子有界索引。summary 与 events/orders/fills/ledger/unexecuted 分离，可跨重启按 `reportId` 查询；`replay-stats.json` 只是最近报告兼容投影，v4/v5 原始文件不迁移、不重写。
+
+默认 fill policy 仍是 `next-bar-limit`。`next-open`、`signal-close`、`delay-30s/60s/120s` 只作为显式敏感性场景；5 分钟 frame 没有明确 `delayedPrices` 证据时，秒级延迟返回 `second_level_execution_path_unavailable`，不会拿下一根开盘伪装成 30/60/120 秒成交，也不声称队列位置或部分成交。同 K 同触 target/stop 可选择 `unknown` 或 `conservative-stop`，entry fill 歧义与后续 outcome 分开，policy 必须进入 fingerprint 和 report。
+
+dataset/report fingerprint 绑定 selected content，不绑定同一分区在 as-of 之后变化的 `storeContentSha256` 或 rejected-line 运维计数；后两者仍展示用于存储诊断，但不能改写过去报告的语义身份。
+
+v6 `validationGate` 完全由 Host 投影，客户端不能提交 `validated`。至少需要 12 个月实际数据、两个已完成且参数冻结的 OOS folds、100% real bid/ask 验证路径、完整 session、已核实费用语义、四个可用基准，以及总体和每折不确定性区间；任一事实缺失都 fail-closed 为 `evidenceStatus:"exploratory"`。本机采集尚未证明这些条件，因此阶段 3 完成表示验证框架可运行，不表示 control 策略已通过长期验证。
+
+### 7.9 阶段 4 策略实验层
+
+阶段 4 在现有 `ReplaySimulator` seam 上增加隔离实验，不改变 live 组合路径：
+
+- `strategy-contract.js` 定义 `goldboard-strategy-interface-v1`，统一同步 `evaluate({ marketFrame, portfolio, params, previousState })` 的 decision、valuation、nextState、active/suppressed signals 与 diagnostics；descriptor fingerprint 和显式 adapter fingerprint 进入 simulator input fingerprint，函数源码 hash 不再是唯一策略身份。
+- `strategy-registry.js` 是策略目录的唯一 module。内建 `control` 与 `orb-trend-pullback`；factory 不出现在 wire。control 始终可用且是唯一 live 策略，候选只有出现在 `experiments.enabledStrategyIds` 时才能创建。
+- `strategy-control.js` 只把现有 `computePlan` 适配到统一 interface，不复制 EMA/RSI/支撑/布林/ATR 规则；live snapshot、setup、decision 和 order 增加 `strategyId:"control"` 与 `signalSemantics:"state_condition"`。
+- `strategy-orb.js` 提供 replay-only ORB/趋势回调候选。每个 session 从 `observing` 构建 opening range，突破 crossing 后进入 `armed`，回调收复后 `triggered`，超时进入 `expired`；同一 setup 不重复发买单，状态、regime 与压制原因都进入 evaluation 轨迹。
+- `market-regime.js` 用版本化 EMA 距离/斜率和 ATR 比例给出 `trend/range/high_volatility/unknown`；预热不足和 partial-only 输入保持 unknown。`factor-contract.js` 保存 observation period、release、first available、revision/vintage、tradable-after 与 ingested-at，并在 as-of 选择时拒绝未来 revision；必需因子缺失或 stale 时只返回 hold/unknown。
+- `experiment-config.js` 是无依赖的设置规范化 seam，避免 config/replay 的 ESM 初始化环。实验默认 `enabled:false`，control 自动保留；live `strategy` 平面不读取实验配置。
+- `strategy-experiments.js` 展开 strategy × signal lane × cost × parameter × ablation 场景。每个场景调用同一 replay/execution module，但使用独立 portfolio、strategy state、orders 和 ledger；候选运行使用 `persist:false`，不会覆盖最近的 control report。
+- `experiment-report.js` 投影独立 `goldboard-strategy-experiment-v1`，包含场景、control 差值、消融、敏感性、OOS、未运行 benchmark capability 和 promotion gate。只有矩阵完整、多个 OOS fold、成本压力与 control/benchmark 比较均通过时才可能是 `eligible_to_apply`；该状态仍固定 `liveStrategyChanged:false`，不是推荐或自动切换。
+
+CMB 与 Au99.99 signal lane 可按当前数据能力独立运行并继续以 CMB accumulated-gold 执行口径结算。XAU 已进入策略 lane 契约，但 Host 在 XAU 与 USDCNY 不能共同提供 point-in-time 历史时返回 `xau_usdcny_point_in_time_unavailable`，不以当前汇率回填。ARIMA/SARIMA/GARCH、LSTM/Transformer/XGBoost 和 DRL 只作为 `unavailable` capability 登记；缺少训练 artifact 和统一 point-in-time features 时不生成分数或收益。
 
 ---
 
 ## 8. 宿主路由契约
 
 统一响应信封：`{ ok: true, ... }` 或 `{ ok: false, error: { code, message?, details? } }`。
-每个路径只注册一次，内部按 `req.method` 分发；请求体读入设 256 KiB 上限（413）。
+每个路径只注册一次，内部按 `req.method` 分发；Fetch adapter 统一缓冲上限 2 MiB（413），config/analysis 等 JSON 路由再施加 256 KiB 语义上限。
 所有 handler 外层统一包一层安全网（v1.5.0）：异常逃逸内部错误映射时回
 `500 { ok:false, error:{ code:"INTERNAL_ERROR", message: 脱敏摘要 } }`（不带堆栈），
 保证任何失败路径都有 JSON 信封而非宿主的裸 400。
 
-### 8.1 `GET /dsh-plugin-goldboard/config`
+### 8.1 `GET /api/dsh-plugin-goldboard/config`
 
 返回脱敏配置 + `secretSet`（对齐 `dsh-plugin-notify` 写法）：
 
@@ -481,17 +561,19 @@ pnl = sellProceeds - buyCost
       "generic": []
     }
   },
-  "secretSet": { "webhooks.feishu.secret": false, "webhooks.dingtalk.secret": false }
+  "secretSet": { "webhooks.feishu.secret": false, "webhooks.dingtalk.secret": false },
+  "revision": 0
 }
 ```
 
-### 8.2 `POST /dsh-plugin-goldboard/config`
+### 8.2 `POST /api/dsh-plugin-goldboard/config`
 
 请求：
 
 ```json
 {
   "config": { "...": "..." },
+  "expectedRevision": 0,
   "clearSecrets": ["webhooks.feishu.secret"]
 }
 ```
@@ -505,39 +587,39 @@ pnl = sellProceeds - buyCost
   等数组整体替换；未知顶层键返回 `400 UNKNOWN_CONFIG_KEY`。此前「传部分顶层节会重置其余节」
   的行为被修正，依赖旧行为的外部脚本需注意。
 - 空字符串 secret = 保留旧值；非空 = 替换；`clearSecrets` 列出的 = 清空（语义不变）。
-- 校验：手续费默认 `buyPerGram=0, sellPerGram=5`（总额 5，允许用户改，但设置页给出成本影响提示）；招行价差允许负值；克数与金额非负、上限 ≤ 100000 克、成本价 > 0；
+- 校验：手续费默认 `buyPerGram=0, sellPerGram=5`（总额 5，允许用户改，但交易 Tab 给出成本影响提示）；招行价差允许负值；克数与金额非负、上限 ≤ 100000 克、成本价 > 0；
   策略参数新增 `strategy.weaknessRsi`（默认 75）与 `strategy.weaknessShadowAtrMult`（默认 1.0）。
-- 响应返回脱敏后的完整配置。
+- 响应返回脱敏后的完整配置和新的 `revision`。`expectedRevision` 不匹配时返回
+  `409 { ok:false, error:{ code:"STALE_CONFIG" }, config, secretSet, revision }` 且不写盘；
+  非整数 revision 返回 `400 BAD_REVISION`。
 - `analysis.enabled=true` 时，保存前用 `ctx.llm.prepareCall()` 校验 provider/model/reasoning；不可用时返回稳定错误码，不静默替换模型。
-- **持久化分支（v1.6.0，plan-04）**：宿主挂载可写 settings provider 时，POST 改为
-  经 `settings.replace(namespace, …)` 写入 `settings.yaml` 的 goldboard namespace
-  （`config.json` 退役；路由本身保留——远程浏览器的 settingsScope 只读不可写，
-  仍需此写入口）；无 provider 或 provider 只读时保持经典 `config.json` 原样。
-  GET 在两种模式下都是 `runtime.config` 的只读脱敏投影。
+- **持久化（0.2.1）**：POST 写入 `$DSH_HOME/storages/dsh-plugin-goldboard/config.json`，
+  原子写、文件权限 `0600`；GET 返回 `runtime.config` 的只读脱敏投影 + `revision`。
+  保存带 `expectedRevision`，不匹配返回 409 `STALE_CONFIG` 且不写盘。
 
-### 8.3 `GET /dsh-plugin-goldboard/models`
+### 8.3 `GET /api/dsh-plugin-goldboard/models`
 
 返回当前 `ctx.llm` 的 provider/model/reasoning 目录；单个 provider 失败进入 `failures`，空目录不回退到硬编码模型。
 
-### 8.4 `GET/POST /dsh-plugin-goldboard/analysis`
+### 8.4 `GET/POST /api/dsh-plugin-goldboard/analysis`
 
 - `GET` 返回当前 running 查询、最近结果和日志健康状态。
 - `POST` 读取宿主最新快照，执行缓存/running 去重和 provider-neutral 模型调用；质量门控未通过时仍可调用，但模型不得返回 `analysis_ready`。
 - 每个真实调用返回 `queryId`；`force=true` 只绕过缓存，不绕过模型输出状态约束。
 
-### 8.5 `GET /dsh-plugin-goldboard/analysis-logs`
+### 8.5 `GET /api/dsh-plugin-goldboard/analysis-logs`
 
 支持 `limit`、`cursor`、`queryId`、`status`、`provider`、`model`、`from`、`to` 和 `detail=true`。默认列表只返回摘要，详情也不返回凭据、Authorization、Webhook secret 或原始 prompt。
 
-### 8.6 `POST /dsh-plugin-goldboard/replay`
+### 8.6 `POST /api/dsh-plugin-goldboard/replay`
 
 接收固定 `asOf`、quotes 和 bars，纯函数重建质量、指标、plan 与 snapshot；不请求行情源、不发提醒、不调用模型。
 
-### 8.7 `POST /dsh-plugin-goldboard/manual-cmb-bars`
+### 8.7 `POST /api/dsh-plugin-goldboard/manual-cmb-bars`
 
-接收设置页手动录入的今日招行积存金分钟价（文本或 `entries` 数组），仅补充缺失的 1 分钟 bar，并从 1 分钟数据重建缺失的 5/15/60/1440 分钟桶；不会覆盖已有 bar。设置页通过 `GET /dsh-plugin-goldboard/manual-cmb-missing` 获取今日缺失分钟列表，便于直接填写价格。成功响应包含 `added`、`skipped` 和最新 `snapshot`。
+接收「数据」Tab 手动录入的今日招行积存金分钟价（文本或 `entries` 数组），仅补充缺失的 1 分钟 bar，并从 1 分钟数据重建缺失的 5/15/60/1440 分钟桶；不会覆盖已有 bar。「数据」Tab 通过 `GET /api/dsh-plugin-goldboard/manual-cmb-missing` 获取今日缺失分钟列表，便于直接填写价格。成功响应包含 `added`、`skipped` 和最新 `snapshot`。
 
-### 8.8 `GET /dsh-plugin-goldboard/snapshot`
+### 8.8 `GET /api/dsh-plugin-goldboard/snapshot`
 
 ```json
 {
@@ -574,15 +656,20 @@ pnl = sellProceeds - buyCost
   完整元数据仍可经 `/bars` 获取）。典型负载（AU9999/XAU/CMB 三道满载）≈240KB。
 - 客户端只消费此结构，具体指标增减在实现阶段冻结。
 
-### 8.9 `GET /dsh-plugin-goldboard/bars?instrument=AU9999&interval=1&limit=120`
+### 8.9 `GET /api/dsh-plugin-goldboard/bars?instrument=AU9999&interval=1&limit=120`
 
-- 参数白名单校验；`interval` 为**数字分钟数**（1 / 5 / 15 / 60 / 1440），返回该标的最近 bars，供展开浮窗时补充历史。
+- 参数白名单校验；`interval` 为**数字分钟数**（1 / 5 / 15 / 60 / 1440），返回该标的最近 bars，供数据页/图表补充历史。
 
-### 8.10 `POST /dsh-plugin-goldboard/test-notify`
+### 8.10 `POST /api/dsh-plugin-goldboard/system-settings`
+
+- 固定命令打开系统通知设置（macOS / Windows / Linux）；不接受调用方提供的 URL 或参数。
+- 不支持平台返回 `501 SYSTEM_UNSUPPORTED`；其余失败返回 `SYSTEM_SETTINGS_FAILED`。
+
+### 8.11 `POST /api/dsh-plugin-goldboard/test-notify`
 
 - 对指定渠道发送测试消息（系统 / 飞书 / 钉钉 / 企业微信 / 通用）。通用 Webhook 统一经过 Host outbound 校验：无凭据 HTTPS、公网 DNS/IP、header allowlist、禁止 redirect；loopback/RFC1918/link-local/metadata 目标返回 `WEBHOOK_URL_BLOCKED`。
 
-### 8.11 `GET/POST /dsh-plugin-goldboard/replay-stats`（v1.14.0，report v5）
+### 8.12 `GET/POST /api/dsh-plugin-goldboard/replay-stats`（当前工作树，report v6）
 
 `POST` 请求体：
 
@@ -590,6 +677,10 @@ pnl = sellProceeds - buyCost
 {
   "days": 10,
   "lane": "cmb",
+  "mode": "diagnostic",
+  "asOf": "2026-08-14T04:00:00.000Z",
+  "fillPolicy": "next-bar-limit",
+  "ambiguityPolicy": "conservative-stop",
   "force": false,
   "detail": false,
   "includePartial": false,
@@ -597,141 +688,98 @@ pnl = sellProceeds - buyCost
 }
 ```
 
-- `days` 夹取 [1,30]；`lane` 为 `cmb|au9999`；默认仅完整时段。
-- `includePartial:true` 显式包含当前/尾部不完整时段并按 as-of 标记；`requireExecutableBid:true` 在缺真实 bid path 时把 touch 指标设 unknown。
-- `detail=true` 返回截断 events、完整 `orders/fills/pendingOrders/trades` 和最近 200 条 `unexecutedSignals`；GET 从内存或落盘读取，v4 文件保持原样可读。
-- 单飞行、1 小时配置感知缓存、断连取消和部分失败信封保持不变。
+- `mode:"diagnostic"` 将 `days` 夹取 [1,30]；`mode:"walk-forward"` 当前只接受有 point-in-time `HistoricalStore` 数据的 CMB lane，并按实际完整 session 建 folds。
+- `asOf` 必须是有效时间；dataset、frame、订单和报告 fingerprint 都绑定该值。`fillPolicy` 接受默认限价和明确的敏感性时点，`ambiguityPolicy` 为 `conservative-stop|unknown`。
+- `includePartial:true` 只允许 partial session 做 mark-to-as-of；session-end/OOS 指标仍排除。`requireExecutableBid:true` 在缺真实 bid path 时将 touch 结果设 unknown。
+- `detail=true` 返回最近 200 条独立 events、`orders/fills/pendingOrders/trades/ledger` 和最近 200 条 `unexecutedSignals`。GET 可带 `reportId`；不带时读取当前内存、不可变 registry 或旧 `replay-stats.json`。
+- report v6 additive 保留 v5 摘要字段，并增加 `reportSchema`、显式 `asOf`、三类 fingerprint、`dataset`、`simulation`、`metrics`、`oos`、`benchmarks`、`groups` 和 Host 派生 `validationGate`。
+- 单飞行、1 小时配置/数据感知缓存、断连取消和逐日部分失败信封保持不变。相同语义输入产生相同 report fingerprint 和 content-addressed `reportId`；`generatedAt` 不进入 fingerprint。
 
-核心 report 字段：
+### 8.13 `GET /api/dsh-plugin-goldboard/replay-reports?limit=20`
 
-```json
-{
-  "version": 5,
-  "strategyId": "control",
-  "strategyVersion": "goldboard-control-v1",
-  "calculationVersion": "goldboard-indicators-v3",
-  "dataSchemaVersion": "goldboard-market-data-v2",
-  "executionVersion": "goldboard-execution-v2",
-  "calendarVersion": "goldboard-cmb-reminder-v2",
-  "evidenceStatus": "exploratory",
-  "validationGate": { "eligible": false, "unmet": ["no_oos_validation", "cost_semantics_unverified"] },
-  "generatedAt": "2026-08-14T04:00:00.000Z",
-  "window": { "from": "2026-08-03", "to": "2026-08-14" },
-  "lane": "cmb",
-  "fillPolicy": "next-bar-limit",
-  "ambiguityPolicy": "conservative-stop",
-  "costAssumptions": {
-    "explicitFeePerGram": { "buy": 0, "sell": 5 },
-    "slippagePerGram": { "buy": 0.2, "sell": 0.2 },
-    "configuredFallbackOffsetPerGram": { "buy": 1.72, "sell": 1.72 },
-    "estimatedSpreadPerGram": 0.2,
-    "historicalCmbProxySpreadPerGram": 5,
-    "productAgreementVerified": false,
-    "realBidAskQuotedSpreadIncluded": true
-  },
-  "executionCoverage": {
-    "bars": 100,
-    "realBidAskBars": 18,
-    "proxyBars": 80,
-    "unknownBars": 2,
-    "realBidAskCoverage": 0.18,
-    "proxyBidAskCoverage": 0.8,
-    "unknownBidAskCoverage": 0.02
-  },
-  "completeDays": 8,
-  "partialDays": 0,
-  "excludedDays": 1,
-  "totals": { "steps": 4080, "directionalEvents": 84, "unexecutedSignals": 8, "blockedSteps": 12 },
-  "orders": { "placed": 20, "filled": 9, "expired": 7, "pending": 0, "replaced": 4, "ambiguous": 2 },
-  "fillRate": 0.45,
-  "expiryRate": 0.35,
-  "averageDelayMs": 420000,
-  "ambiguousBarCount": 2,
-  "realBidAskCoverage": 0.18,
-  "overall": {
-    "accounting": "continuous-zero-position",
-    "totalNetCny": -120.5,
-    "maxDrawdownCny": -260.2,
-    "equityCurve": [],
-    "costBreakdown": {}
-  }
-}
-```
+返回最多 50 条不可变 v6 报告摘要，包括 `reportId`、生成/as-of 时间、schema、input/report fingerprint、lane 和验证状态。列表不返回大体积明细；明细通过 8.11 的 `reportId + detail=true` 查询。损坏 index 或单份详情只被忽略并记录警告，不影响 Host 与旧最近报告读取。
 
-UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行诊断；新 report 同时显示 `evidenceStatus`、生成时间、provenance、成本假设和 real/proxy/unknown 覆盖。旧报告或缺失元数据的 report 显示 legacy/不可用提示，不推断当前口径。
+客户端对 v5 保留原只读连续账户展示；v6 额外显示 dataset、fingerprint、风险调整指标、OOS folds、置信区间与四类基准。只有 `version===6 && evidenceStatus===validated && validationGate.eligible===true` 才显示“验证结果”，其余状态保持探索性或 legacy。
+
+### 8.14 `GET /api/dsh-plugin-goldboard/strategies`
+
+返回 `goldboard-strategy-registry-v1` 的只读目录投影和规范化实验配置。descriptor 包含 strategy/version/interface、role、lanes、execution instrument、signal semantics、required features/factors、ablations 与 fingerprint；`enabled/live/canDisable` 由 Host 投影。响应不包含 factory、函数、闭包 context 或敏感配置。
+
+### 8.15 `GET/POST /api/dsh-plugin-goldboard/strategy-experiments`
+
+- GET 读取当前进程或 `strategy-experiment.json` 中最近一次 `goldboard-strategy-experiment-v1`；损坏/缺失文件返回 `{ok:true,report:null}`，不影响 live。
+- POST 仅在 `experiments.enabled:true` 后接受 `days`、`mode`、已启用 `strategyIds` 和 `signalLanes`。未知/disabled strategy、disabled lane、未来 as-of 或超过矩阵上限均返回稳定错误 envelope。
+- runner 为每个场景调用 replay 的同源数据、execution 和 OOS module，但传入 `persist:false/useCache:false`；场景相互隔离且不会覆盖 `/replay-stats` 最近 control 报告。
+- 报告保存场景状态、metrics、regime/setup/suppression 分组、control 比较、消融、参数/成本敏感性、OOS 与 promotion 原因。XAU/USDCNY 点时证据缺失和单场景失败为 unavailable/failed，不补成零收益。
 
 ---
 
 ## 9. 浏览器半设计
 
-### 9.1 浮窗看板（`shell.overlay`）
+### 9.1 注册与页面入口
 
-- 插槽：`slots.inject("shell.overlay", () => slots.register({ name: "shell.overlay", id: "dsh-plugin-goldboard-board", order: 200, locale: NS }, GoldBoardOverlay))`
-- 浮层根节点：
-  - `position: absolute`，默认**右上角**（首次启动），可拖拽（pointer capture，复用 `dsh-plugin-pet` 的拖拽模式），拖拽后位置存入 localStorage 键 `dsh-plugin-goldboard:position`。
-  - 收起态：**小圆球**（约 36×36，显示涨跌色圆点，hover 显示价格摘要）。
-  - 根节点只占圆球/卡片实际尺寸，保留 `shell.overlay` 的点击穿透行为。
-- 展开态小卡（约 320×220）：
-  - 头部：`Au99.99 元/克`、`XAU 美元/盎司`、更新时间、市场状态；
-  - 次行：国际金价折算元/克、内外价差、招行积存金估算价（标注“以 App 为准”）；
-  - 中部：Au99.99 1 分钟 sparkline（手写 SVG，不引图表库）；
-  - 底部：当前信号或建议委托价 + “复制委托”按钮；
-  - 关闭/拖拽手柄明确，不遮挡对话输入区。
-- 数据流：`useSyncExternalStore` 或 `useEffect + setInterval` 订阅宿主 snapshot；页面 `visibilitychange` 隐藏时轮询降到 60s，显示时恢复 10s。
-- **今日走势的交易日锚点（v1.3.1）**：交易时段可跨零点（09:00–次日 02:00）。过滤「今天」的 bars 按**交易日**而非日历日：北京时间 00:00 至 `close − 1440`（默认 02:00）之间的时间点归属前一北京日历日开启的交易时段（`tradingDayKey`），因此凌晨时段图表渲染「昨晚 + 今晨」完整折线，而不是被截断成 0–2 点切片；x 轴沿用 `tradingMinuteIndex` 的压缩轴（早尾段在前、开盘后时段在后，中间休市时段被压缩）。涨跌幅基准不受此锚点影响（仍以昨收折算 / 手动昨收为基准；招行昨收优先取**日历日** 00:00 的自身价格，该查询刻意不跟随交易日锚点）。
-- 语言：所有文本经 `t()`；`locale: NS` 保证切换即时重渲染。
+- `sidebar.panellist`：`id: "goldboard"`、`order: 20`、`locale: NS`、`label: () => t("panel")`，组件为金币图标 + 右侧实时金价；侧边栏收起时只保留图标。
+- `main`：`key: "goldboard"`、`locale: NS`，组件为 `GoldBoardPage`；侧边栏点击由 shell 调用 `ctx.layout.selectPanel("goldboard")`。
+- 不再注册 `shell.overlay`（浮窗）与 `settings.section`（设置页）。
+- 页面入口包 `PageErrorBoundary`；渲染失败显示错误、折叠栈和重试按钮，避免 shell 的空 `data-slot-error` 死格。
 
-### 9.2 设置页（`settings.section`）
+### 9.2 页面信息架构
 
-- 插槽：`id: "dsh-plugin-goldboard"`，`order: 65`，`locale: NS`。
-- 分区：
-  1. 持仓与上限（分批克数 / 平均成本 / 最大克数）
-  2. 执行成本（报价外显式买卖费、fallback 估算点差、滑点）
-  3. 招行积存金价差（买入/卖出各 +1.72 元/克，可负）
-  4. 信号阈值（最小利润、最大亏损、ATR 系数、RSI 阈值）
-  5. 交易时段（工作日 09:00–次日 02:00，节假日表）
-  6. 提醒（系统通知开关、Webhook；无冷却/勿扰选项）
-  7. 数据源状态（来源、最后更新时间、stale 标记）
-- **回放诊断卡片（v1.14.0 / report v5）**：提供天数选择和生成按钮；顶部先显示探索性诊断状态、生成时间、control 与 provenance 版本、5 分钟模拟成交警告、完整/部分时段、fill/expiry rate、账户约束未执行数、双触及数和真实/代理/未知 bid/ask 覆盖，再显示连续账户净结果/已实现/未实现/期末克数。成本假设（显式费用、滑点、fallback/proxy spread 和未核实的产品费用语义）单独展示。明细弹窗将模拟订单和 `unexecutedSignals` 分表显示，后者明确列出信号时点、价格、当时仓位/上限与原因。独立信号表只在 v5 显示并明确 executable/proxy 口径。v4/v2 只显示 legacy 警告和仍可安全读取的参数，不投影 v5 account 或 touch 卡片。全部文案走 `t()` 双语词典，表格样式只使用 `--dsw-alias-*` token。
-- **配置读写双模式（v1.6.0，plan-04）**：客户端 `inject` 增加
-  `connection / remote / settingsScope`，按绑定 scope 快照三态渲染——
-  - `ready`（回环浏览器 + 宿主挂载 settings provider）：读取走共享 describe 镜像
-    （脱敏视图），保存按钮把草稿对快照做差分、合成一批嵌套路径 ops 走
-    `settings.mutate`（revision fencing 由框架处理；失败后重载镜像再试）；
-  - `unavailable` / 无 scope 服务：完整回落旧 GET/POST `/config` 流程
-    （远程浏览器因 settings RPC 仅限回环，恒为此态）；
-  - `loading`：显示加载中；无 provider 的宿主会永远停在 loading，3 秒超时自动回落。
-- Webhook secret：settings 模式下脱敏视图**不含** secret 字段，输入框恒为空、
-  「已配置」徽标来自镜像行的 `secrets: [{path, set}]` 边车，「清除」在保存时下发
-  嵌套 `unset`；明文永不回显。fallback 模式保持旧 `secretSet` 占位写法。
-- 按钮使用 `--dsw-alias-button-primary-fill / hover`；卡片透明 + `border-l2`；开关用 `state-business-primary`；不得硬编码颜色。
-- 双语字典 `DICT.zh` / `DICT.en` 必须 1:1 键集合，测试断言。
+6 个 Tab：概览 / 交易 / 策略与回放 / 分析 / 数据 / 设置；最后访问的 Tab 存 `sessionStorage`。页头与 Tab 栏固定，只有 Tab 内容区滚动。
 
-### 9.3 文案与免责
+- **概览**：3 张行情卡（Au99.99、XAU、CMB；点击切换图表品种）、今日走势（SVG，约 960×200）、当前建议（风险闸门、建议委托+复制、回本/目标/止损、理由、指标表）、持仓/风险、数据质量条。
+- **策略与回放**：replay-stats（10/20/30 天、诊断/走查、v4/v5/v6 报告、详情弹窗）、策略实验面板（既有组件，页面级草稿）、信号账本摘要+详情弹窗。
+- **分析**：模型配置、立即分析、结果、查询日志弹窗。
+- **数据**：数据源健康与 API 日志、历史记录、手动 CMB 缺失分钟补录。
+- **交易**：持仓/上限、风险预算、费用、招行价差、手动昨收（仅当日有效，北京时间 0 点自动清空）、策略参数、交易时段；顶部独立保存条。
+- **设置**：侧边栏金价选择、系统通知与 Webhook；顶部独立保存条。
 
-- 看板常驻一行小字：`技术面参考，非投资建议`。
-- 每个建议委托弹层/卡片包含 `风险提示` 与 `扣费后回本价`。
-- 提示文案不出现“保证盈利”“必涨”“精准买卖点”等表述。
+每个可配置 Tab 共用同一份配置状态但使用独立 `draft` 视图：保存时只提交本 Tab 的配置节（`position/limits/risk/fee/cmb/manualPrevClose/strategy/tradingHours`、`experiments`、`analysis`、`system/webhooks`），未保存的其他 Tab 修改不会被一起提交。`POST /api/dsh-plugin-goldboard/config` 携带 `expectedRevision`；保存成功后只把本 Tab 的节合并回草稿。409 保留草稿并提示，重新保存使用服务端最新 revision。离开页面丢弃未保存草稿（页内提示）。
 
----
+### 9.3 数据流与交互
+
+- `useSnapshot` 轮询 snapshot：10s；页面隐藏 60s；失败 10s→20s→40s→60s 退避；`visibilitychange`/`online` 立即刷新。
+- 配置 GET 返回 `config + secretSet + revision`；保存成功后重置草稿；secret 只写不回显，清理由 `clearSecrets` 显式下发。
+- 错误保留最后一次可用数据；401 提示刷新页面；页面错误边界兜底渲染异常。
+- Tab 使用 `role=tablist/tab/tabpanel` + 方向键/Home/End；图表有文本摘要；按钮有 `aria-label`。
+- 详情弹窗 portal 到 body，带 Escape、焦点陷阱和焦点恢复；切换 Tab 时关闭弹窗。
+- **今日走势的交易日锚点（v1.3.1）**：跨零点交易时段按 `tradingDayKey` 归属前一交易日，图表渲染「昨晚+今晨」；x 轴沿用压缩轴；涨跌幅基准仍按昨收/手动昨收。
+- 刷新按钮只刷新行情 snapshot；各 Tab 自己保留数据刷新入口。
+
+### 9.4 视觉尺度与双端适配
+
+- 页面标题 20/28 500；正文 14/22；提示 12/18；卡片标题 14/22 500；输入 32px；主/次按钮 36px；卡片 padding 16、gap 12、radius `--dsw-radius-lg`；根节点显式 14/22。
+- 颜色只用 `--dsw-alias-*` / `--dsw-radius-*` / `--dsw-focus-ring-*`；涨红跌绿沿用 `state-error-primary` / `state-success-primary`。
+- 断点：1000px 以下行情 2 列、dashboard 单列；680px 以下行情单列、Tab 横向滚动、设置导航横排、图表 160px。
+- macOS `[data-platform="darwin"]` 页头增加 `--dsh-frame-top-clearance`；Windows 依赖 layout 的 titlebar；Desktop 仅显示平台提示和“打开系统通知设置”按钮。
+- `prefers-reduced-motion` 关闭非必要动画。
+
+### 9.5 文案与免责
+
+- 页面底部常驻 `技术面参考，非投资建议` 与公开数据源提示。
+- 每个建议委托卡片包含风险提示与扣费后回本价。
+- 文案不出现“保证盈利”“必涨”“精准买卖点”等表述。
+- `DICT.zh` / `DICT.en` 必须 1:1 键集合，测试断言；en 不含中文。
 
 ## 10. 持久化与状态
 
 | 文件 | 内容 |
 | --- | --- |
-| `$DSH_HOME/settings.yaml`（goldboard namespace） | **v1.6.0 起的配置主存储（plan-04）**：宿主挂载 settings provider 时，全部配置节经 `installSettingsSection` 注册为 namespace `dsh-plugin-goldboard`，分层为 schema 默认 → cordis entry config（base）→ 用户文档；写入带 revision fencing，secret 字段 `role('secret')` 由 wire 层统一脱敏 |
-| `config.json` | **仅 fallback**（无 settings provider 或 provider 只读）时的脱敏前配置存储；原子写（tmp + rename），并发写串行化。升级首次启动检测到该文件时一次性迁移进 settings namespace 并改名为 `config.json.migrated` 保留（不删除，便于回滚）；namespace 已有用户层时只归档不覆盖 |
-| `state.json` | state schema v2 热缓存：行情、滚动 bars、指标/提醒/信号道状态、CMB 校准样本与溢价史；保留旧字段供旧二进制回滚 |
-| `state.json.v1*.backup` / `state.json.migration-v2.json` | 首次/重复迁移的原字节备份与 source/backup/target SHA-256、版本、时间和回滚路径；无效 JSON 或非对象根隔离为 `.corrupt-*.bak` |
+| `config.json` | **0.2.1 起的配置主存储**：`$DSH_HOME/storages/dsh-plugin-goldboard/config.json`；原子写（tmp + rename，权限 `0600`），并发写串行化；GET/POST 带 `revision` / `expectedRevision` 冲突保护；secret 字段只写不回显。旧版 `config.json.migrated` 在无 `config.json` 时一次性导入为新的 `config.json`（保留备份）；已有 `config.json` 永远优先 |
+| `state.json` | state schema v3 热缓存：行情、滚动 bars、指标/提醒/信号道状态、CMB 校准样本、溢价史，以及有界 `signalLedger`（setup/decision/order/adjustment、持仓对账锚点） |
+| `state.json.v1*.backup` / `state.json.v2*.backup` / `state.json.migration-v3.json` | 首次/重复迁移的原字节备份与 source/backup/target SHA-256、版本、时间和回滚路径；v2 `lastSuggestedOrder` 只投影为 legacy pending，不补 fill/add/PnL；无效 JSON 或非对象根隔离为 `.corrupt-*.bak` |
 | `history/*.jsonl` | `HistoricalStore` 按 CMB 交易日 append-only 保存 customer ask/bid、逐侧来源、三类时间、延迟和证据身份；中部损坏分区隔离，尾部撕裂截断恢复 |
+| `replay-reports/replay-report-index-v1.json` / `replay-report-v6-*.json` | report v6 不可变详情与原子有界索引；保存 events/orders/fills/pending/trades/ledger/unexecuted，损坏项不影响其他报告或旧兼容文件 |
+| `replay-stats.json` | 最近报告兼容投影；v4/v5 读取不迁移、不补字段、不重写原字节 |
+| `strategy-experiment.json` | 最近一次隔离策略实验 report v1；原子写、损坏时回退为空，不改变 control report、state 或 live config |
 | `alerts-log.json` | 最近 200 条已发提醒（时间、action、价格）；`sentTo` 自 v1.5.0 记录真实渠道结果数组 `[{ channel, ok, error? }]`，替代此前恒为 `[null]` 的占位 |
 | `api-log.jsonl` | 最近 API 调用记录（JSONL，超 2MB 轮转为 `.1`，仅保留一代） |
 
-- **plan-04 边界（v1.6.0）**：`pollMs`、`directory` 等激活期参数仍走 cordis.patch.yml /
-  entry config，不入 settings namespace；bars/state/api-log/analysis-log 等非配置数据
-  继续留在 `storages/dsh-plugin-goldboard/`（大状态与二进制不进 settings）。
-- 迁移语义：迁移写入的是 normalize 后的完整配置（含当时默认值），此后代码默认值变更
-  不影响已迁移用户层——需要回到新默认时在设置页重置该项（unset 后回落 base/默认）。
+- **0.2.1 边界**：`pollMs`、`directory` 等激活期参数走 cordis.patch.yml / entry config，
+  不写入 `config.json`；bars/state/api-log/analysis-log 等非配置数据继续留在
+  `storages/dsh-plugin-goldboard/`。配置文件与状态目录均为 owner-only 权限。
+- 迁移语义：`.migrated` 导入的是 normalize 后的完整配置（含当时默认值）；此后代码
+  默认值变更不影响已导入的 `config.json`。
 
 - `state.json` 损坏或根类型无效时先隔离原件、log warning 再回退；历史 JSONL 仅容忍可恢复的撕裂尾部，中部损坏隔离整个分区，其他交易日继续可读。GET 不抛错。
 - Webhook secret 永不进入 snapshot、bars、日志。
@@ -739,7 +787,7 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
 - **分区写盘节奏（v1.4.0）**：state.json 仍是单文件，但按分区脏标记差异化落盘——
   `bars`（体积主体）脏标记后最短间隔 `STATE_BARS_FLUSH_MS = 5min` 才写一次，
   且锚定整分钟边界（最新 1m 桶滚动后）；其余 KB 级字段（quotes / alertState /
-  signalState / lastSuggestedOrder / lastAlertLog）脏即写。dispose 时执行可等待的
+  signalState / lastSuggestedOrder / signalLedger / lastAlertLog）脏即写。dispose 时执行可等待的
   最终 flush（cordis 支持异步 disposer）。崩溃窗口最多丢约 5 分钟合成 1m bar，
   重启后由报价轮询自建 + K 线补齐。
 - **localeHint 不再持久化（v1.4.0·轻微行为变化）**：通知文案语言提示仅存内存，
@@ -778,9 +826,9 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
 | 技术指标规则失效 | 用户亏损 | 规则透明、可关、可调；界面免责；v2 才谈回测 |
 | 招行价差估算偏离实际 | 建议委托价失真 | 默认 +1.72 元/克可调；看板常驻“招行价以 App 为准”；偏离提示阈值可设 |
 | 节假日/时段配错 | 休市时发错误信号 | 交易时段状态机（工作日 09:00–次日 02:00 + 节假日表）；休市抑制开平仓提醒 |
-| 手动持仓与真实账户漂移 | 建议失真 | 设置页显示“最后同步时间”；用户手动更新；v2 预留账户同步 |
-| 宿主不运行时无提醒 | 漏提醒 | 设置页明示“提醒依赖 DSH 宿主运行”；浏览器半只负责看板 |
-| 浮窗遮挡 UI | 打扰 | 折叠优先、根节点尺寸限定、可拖拽、可关闭、不抢焦点 |
+| 手动持仓与真实账户漂移 | 建议失真 | 交易 Tab 显示“最后同步时间”；用户手动更新；v2 预留账户同步 |
+| 宿主不运行时无提醒 | 漏提醒 | 设置 Tab 明示“提醒依赖 DSH 宿主运行”；浏览器半只负责看板 |
+| 页面信息密度高 | 阅读负担 | 6 Tab 分区、顶部保存条、响应式单列、详情弹窗按需打开 |
 
 ---
 
@@ -800,25 +848,24 @@ UI 只在 `version===5 && executionVersion` 时显示 v5 连续账户和执行�
 ## 13. 验证计划
 
 - 离线：
-  - `node --check lib/index.js lib/client.js`
-  - `node --test`：配置归一化、报价解析器（用本机实测样本做 fixture）、K 线解析、指标计算、回本价公式、提醒状态机。
+  - `node --check lib/index.js lib/client.js lib/connection-routes.js lib/routes.js`
+  - `node --test`：配置归一化/迁移/权限、路由 adapter、回放/策略域测试、客户端注册/渲染/字典。
   - 断言 `Object.keys(DICT.zh).sort()` 与 `DICT.en` 一致。
 - 宿主：
-  - `curl -s http://127.0.0.1:3080/plugins/dsh-plugin-goldboard/client.js | head -c 60` 输出 factory bundle；
-  - `curl` 验证 config / snapshot / bars / test-notify 路由。
+  - 用 `connection.fetch.register` 收集路由，断言 key 为 `/api/dsh-plugin-goldboard/...`。
+  - 认证 GUI 内验证 snapshot/config/ledger/analysis/strategy-experiments；未认证 `/api` 只作 401 探针，不证明路由存在。
+  - 旧 `/dsh-plugin-goldboard/...` 匿名路径应 404。
 - 浏览器：
-  - Chrome headless + CDP 验证浮窗 DOM 出现、设置页保存、语言中英切换即时生效；
-  - 明暗主题下 `getComputedStyle` 检查浮窗与设置页颜色跟随 `--dsw-alias-*`。
+  - 临时静态 HTML 夹具 + Chrome headless 截图，检查明/暗主题、1440/1000/680 三档密度和断点。
+  - 已验证：概览三卡/图表/建议/持仓布局、交易 Tab 字段/顶部保存条、明暗主题与窄屏断点。
+  - 实机：侧边栏入口、5 Tab、保存后重启保留、语言切换、弹窗、窄屏。
 - 行情：
-  - 用真实接口做 10 分钟烟雾测试，确认报价新鲜度、来源切换、休市状态正确。
-
----
-
+  - 真实接口烟雾测试，确认报价新鲜度、来源切换、休市状态正确。
 ## 14. 评审问题确认结果（已逐项 ask-question 确认）
 
 1. 配置默认成本：**买入 0 + 卖出 5**；v1.11.0 起定义为报价外显式费用，需按产品协议核对，真实 bid/ask 点差另列。
 2. 交易标的：实际交易**招行积存金**；插件信号用 Au99.99（缺失时用国际金价折算），招行价兜底按国际金价按汇率折算 + 固定价差估算（默认 +1.72 元/克，买卖可分别调）。
 3. 交易时段：**工作日 09:00–次日 02:00**，周末和法定节假日休市。
 4. 提醒：**无冷却、无勿扰**，交易时段内每次阈值穿越都立即提醒。
-5. 浮窗：**右上角，可拖拽，可收起为小圆球**。
+5. UI 形态：**侧边栏「黄金看板」入口 + 独立主面板页面**（0.2.1 重构；旧浮窗与 Settings 页面已移除）。
 6. 国际金价展示：**美元/盎司 + 折算元/克 + 内外价差**都显示。

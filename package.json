@@ -1,13 +1,9 @@
 {
   "name": "dsh-plugin-goldboard",
-  "version": "1.14.0",
-  "description": "Gold price dashboard and intraday decision support for the DeepSeek Harness web GUI: versioned market-data facts, independent CMB/SGE/XAU calendars, durable CMB bid/ask history, fee-aware suggestions, exploratory replay diagnostics, and host system/webhook alerts.",
+  "version": "1.15.0",
+  "description": "Gold dashboard and intraday decision support for DeepSeek Harness Web and Desktop: a sidebar Gold Board page with quotes, plan/risk panel, replay diagnostics, isolated strategy experiments, model analysis, data-source health and settings.",
   "type": "module",
   "main": "lib/index.js",
-  "dependencies": {
-    "@deepseek-ai/dsh-settings": "^0.1.1-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.1"
-  },
   "exports": {
     ".": {
       "default": "./lib/index.js"
@@ -21,23 +17,48 @@
     "./execution": {
       "default": "./lib/execution.js"
     },
+    "./risk": {
+      "default": "./lib/risk.js"
+    },
+    "./target-trail": {
+      "default": "./lib/target-trail.js"
+    },
+    "./ledger": {
+      "default": "./lib/signal-ledger.js"
+    },
     "./history": {
       "default": "./lib/historical-store.js"
     },
     "./replay": {
       "default": "./lib/replay.js"
     },
+    "./strategy": {
+      "default": "./lib/strategy.js"
+    },
+    "./experiments": {
+      "default": "./lib/experiments.js"
+    },
+    "./factors": {
+      "default": "./lib/factors.js"
+    },
     "./testing": {
       "default": "./lib/testing.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": {
+      "default": "./cordis.patch.yml"
+    }
   },
   "files": [
     "lib/*.js",
+    "cordis.patch.yml",
     "DESIGN.md",
     "README-en.md",
     "docs/optimization-roadmap.md",
     "docs/stage-1-implementation-plan.md",
+    "docs/stage-2-implementation-plan.md",
+    "docs/stage-3-implementation-plan.md",
+    "docs/stage-4-implementation-plan.md",
     "docs/v1.11.0-strategy-optimization.md"
   ],
   "dsh": {
@@ -45,6 +66,9 @@
       "platform": "web",
       "inject": [],
       "immediately": true
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
     }
   },
   "license": "MIT",
@@ -61,7 +85,6 @@
     "au9999",
     "xau",
     "dashboard",
-    "floating-window",
     "trading-signals",
     "web-ui",
     "goldboard",
@@ -71,6 +94,9 @@
     "ai",
     "ui-plugin",
     "sidebar",
+    "sidebar-page",
+    "desktop",
+    "bundle",
     "javascript",
     "react",
     "open-source"
@@ -85,5 +111,8 @@
   "bugs": {
     "url": "https://github.com/c-ling/dsh-plugin-goldboard/issues"
   },
-  "homepage": "https://github.com/c-ling/dsh-plugin-goldboard#readme"
+  "homepage": "https://github.com/c-ling/dsh-plugin-goldboard#readme",
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0-0"
+  }
 }

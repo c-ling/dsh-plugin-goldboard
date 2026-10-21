@@ -23,6 +23,7 @@ import {
   REPLAY_DAYS_MAX,
   REPLAY_EVIDENCE_STATUSES,
   REPLAY_FILL_POLICY,
+  REPLAY_STATS_COMPATIBILITY_VERSION,
   REPLAY_STATS_VERSION,
   REPLAY_STRATEGY_ID,
   REPLAY_STRATEGY_VERSION,
@@ -30,7 +31,9 @@ import {
   aggregateReplayReport,
   applyReplayFill,
   computeForwardOutcome,
+  createReplayFoldInitialState,
   createReplayStats,
+  projectReplayFoldDiagnostics,
   evaluateReplayLimitOrder,
   executeReplayTrade,
   expandBarsToMinuteBars,
@@ -127,6 +130,36 @@ test("listReplayTradingDays caps at REPLAY_DAYS_MAX and honours the overnight se
   assert.deepEqual(saturdayDays, ["2026-08-11", "2026-08-12", "2026-08-13"], "active Friday session is excluded by default");
   const withPartial = listReplayTradingDays({}, 3, earlySaturday, { includePartial: true });
   assert.deepEqual(withPartial, ["2026-08-12", "2026-08-13", "2026-08-14"]);
+});
+
+test("walk-forward state is fresh while ORB warmup carries bars only, and fold failures stay visible", () => {
+  const warmupFrames = [{
+    timestamp: "2026-07-31T01:05:00.000Z",
+    t: Date.parse("2026-07-31T01:05:00.000Z"),
+    barT: Date.parse("2026-07-31T01:00:00.000Z"),
+    o: 100, h: 101, l: 99, c: 100.5, complete: true,
+  }];
+  const firstControl = createReplayFoldInitialState({ strategyId: "control", warmupFrames });
+  firstControl.signalState.pendingTicks = 99;
+  const secondControl = createReplayFoldInitialState({ strategyId: "control", warmupFrames });
+  assert.notEqual(secondControl.signalState.pendingTicks, 99);
+  assert.equal(JSON.stringify(secondControl).includes("2026-07-31"), false,
+    "control indicator history comes from point-in-time contexts, not training-period strategy state");
+
+  const orb = createReplayFoldInitialState({
+    strategyId: "orb-trend-pullback", warmupFrames, session: "2026-08-01",
+    parameters: { openingRangeBars: 2 }, lane: "cmb",
+  });
+  assert.equal(orb.session, "2026-08-01");
+  assert.equal(orb.phase, "observing");
+  assert.equal(orb.bars.length, 1);
+  assert.equal(orb.positionSeen, false);
+
+  assert.deepEqual(projectReplayFoldDiagnostics({ inputFrames: 20, duplicatesDropped: 1 }), []);
+  assert.deepEqual(projectReplayFoldDiagnostics({ executionRejected: 2, invalidDecisions: 1 }), [
+    { type: "replay_simulator", code: "executionRejected", count: 2 },
+    { type: "replay_simulator", code: "invalidDecisions", count: 1 },
+  ]);
 });
 
 test("replay session status uses the configured close instead of the last observed bar", () => {
@@ -261,7 +294,7 @@ test("limit-order matcher enforces next-bar eligibility, touch and expiry", () =
   assert.deepEqual(evaluateReplayLimitOrder(order, touched, signalAt + 10 * 60_000), {
     status: "filled", touched: true, fillPrice: 100,
   });
-  assert.equal(evaluateReplayLimitOrder(order, touched, order.validUntilMs).status, "filled", "touch at exact expiry remains eligible");
+  assert.equal(evaluateReplayLimitOrder(order, touched, order.validUntilMs).status, "expired", "validUntil is an exclusive boundary");
   assert.equal(evaluateReplayLimitOrder(order, touched, signalAt + 20 * 60_000).status, "expired");
 
   const buyGap = { askBar: { o: 95, h: 101, l: 94, c: 98 }, bidBar: { o: 90, h: 96, l: 89, c: 93 } };
@@ -445,7 +478,7 @@ test("aggregateReplayReport produces exact per-action counts, rates and buckets"
   const bucket7 = report.confidenceBuckets.find((bucket) => bucket.bucket === "≥7");
   assert.equal(bucket7.events, 2);
   assert.equal(bucket7.targetHitRate, 0);
-  assert.equal(report.version, REPLAY_STATS_VERSION);
+  assert.equal(report.version, REPLAY_STATS_COMPATIBILITY_VERSION);
   assert.equal(report.strategyId, REPLAY_STRATEGY_ID);
   assert.equal(report.strategyVersion, REPLAY_STRATEGY_VERSION);
   assert.equal(report.calculationVersion, "goldboard-indicators-v3");
@@ -734,7 +767,7 @@ test("session-end forced close is disabled by default (no intraday-close bias)",
 
 // ── 4. engine: fetch-once, cache, failure, cancel, persistence ──────────────
 
-async function createTempEngineHarness({ failingDay = null } = {}) {
+async function createTempEngineHarness({ failingDay = null, reportStore = null } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "goldboard-replaystats-"));
   const file = join(dir, "replay-stats.json");
   const queue = makeWriteQueue();
@@ -748,6 +781,7 @@ async function createTempEngineHarness({ failingDay = null } = {}) {
   const liveConfig = {}; // mutable on purpose — cache-fingerprint tests mutate it
   const engine = createReplayStats({
     getConfig: () => liveConfig,
+    reportStore,
     fetchKlines: async (secid, klt, limit, endDay) => {
       calls.push(`${secid}|${klt}|${endDay}`);
       const day = `${endDay.slice(0, 4)}-${endDay.slice(4, 6)}-${endDay.slice(6, 8)}`;
@@ -784,8 +818,11 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
     assert.equal(first.report.daysEvaluated, 2);
     assert.equal(first.report.daysRequested, 2);
     assert.equal(first.report.window.from, "2026-08-13");
-    // v5 wire: limit-order lifecycle + execution diagnostics.
+    // v6 wire: deterministic simulator, dataset, OOS and validation diagnostics.
     assert.equal(first.report.version, REPLAY_STATS_VERSION);
+    assert.equal(first.report.reportSchema, "goldboard-replay-report-v6");
+    assert.match(first.report.inputFingerprint, /^[a-f0-9]{64}$/);
+    assert.match(first.report.reportFingerprint, /^[a-f0-9]{64}$/);
     assert.equal(first.report.fillPolicy, REPLAY_FILL_POLICY);
     assert.ok(first.report.overall && typeof first.report.overall === "object");
     assert.ok(first.report.params.strategy && Number.isFinite(first.report.params.strategy.confirmBars));
@@ -801,6 +838,9 @@ test("engine: deterministic report, per-day fetch memo and TTL cache", async () 
     const forced = await h.engine.run({ days: 2, lane: "au9999", force: true, now: FRIDAY_AFTER_CLOSE });
     assert.equal(forced.cached, false);
     assert.equal(h.calls.length, 4);
+    assert.equal(forced.report.inputFingerprint, first.report.inputFingerprint);
+    assert.equal(forced.report.reportFingerprint, first.report.reportFingerprint);
+    assert.equal(forced.report.reportId, first.report.reportId);
     delete forced.report.generatedAt;
     delete first.report.generatedAt;
     delete forced.report.reportId;
@@ -882,6 +922,10 @@ test("engine: mid-window source failure yields a partial report with failures", 
     assert.equal(result.report.daysFailed, 1);
     assert.deepEqual(result.report.failures, [{ day: "2026-08-14", error: "source exploded" }]);
     assert.ok(result.report.daysEvaluated + result.report.daysFailed === result.report.daysRequested);
+    assert.equal(result.report.simulation.diagnostics.replayDayFailures, 1);
+    assert.ok(result.report.simulation.incompleteSessions >= 1);
+    assert.equal(result.report.validationGate.eligible, false);
+    assert.ok(result.report.validationGate.unmet.includes("incomplete_sessions"));
     // Completed days are still aggregated.
     assert.ok(result.report.totals.steps >= SGE_BARS_PER_DAY * 2);
   } finally {
@@ -916,6 +960,46 @@ test("engine: abort stops the run between days and the engine can run again", as
   }
 });
 
+test("engine: aborting one signalled caller does not cancel another caller", async () => {
+  const h = await createTempEngineHarness();
+  try {
+    const firstController = new AbortController();
+    const secondController = new AbortController();
+    h.hang.enabled = true;
+    const first = h.engine.run({ days: 2, lane: "au9999", force: true, now: FRIDAY_AFTER_CLOSE, signal: firstController.signal });
+    const second = h.engine.run({ days: 2, lane: "au9999", force: true, now: FRIDAY_AFTER_CLOSE, signal: secondController.signal });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    firstController.abort(new Error("first caller left"));
+    h.hang.enabled = false;
+    h.releaseHang();
+    await assert.rejects(first, (error) => error?.name === "AbortError");
+    const completed = await second;
+    assert.equal(completed.ok, true);
+    assert.equal(completed.report.daysFailed, 0);
+  } finally {
+    h.releaseHang();
+    await h.cleanup();
+  }
+});
+
+test("engine: report-registry persistence failure is explicit while compatibility storage succeeds", async () => {
+  const failure = new Error("registry write denied");
+  failure.code = "EACCES";
+  const h = await createTempEngineHarness({ reportStore: { save: async () => { throw failure; } } });
+  try {
+    const result = await h.engine.run({ days: 1, lane: "au9999", now: FRIDAY_AFTER_CLOSE });
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.persistence, {
+      requested: true,
+      reportStored: false,
+      compatibilityStored: true,
+      errors: [{ code: "EACCES", message: "registry write denied" }],
+    });
+  } finally {
+    await h.cleanup();
+  }
+});
+
 test("engine: report persists to replay-stats.json and last() reads it back idempotently", async () => {
   const h = await createTempEngineHarness();
   try {
@@ -933,7 +1017,9 @@ test("engine: report persists to replay-stats.json and last() reads it back idem
     const saved = JSON.parse(await readFile(h.file, "utf8"));
     assert.equal(saved.report.version, REPLAY_STATS_VERSION);
     assert.equal(saved.report.params.days, 2);
+    assert.ok(Array.isArray(saved.events), "independent replay events persist with the report");
     assert.ok(Array.isArray(saved.trades), "continuous trade details persist with the report");
+    assert.ok(Array.isArray(saved.ledger), "simulator ledger persists with the report");
     assert.ok(saved.unexecutedSignals.length > 0, "position-limit signals persist with the report");
 
     const fromMemory = await h.engine.last();
@@ -957,7 +1043,9 @@ test("engine: report persists to replay-stats.json and last() reads it back idem
       });
       return cold.last(true);
     })();
+    assert.deepEqual(detailFromDisk.events, saved.events, "cold reports retain independent signal events");
     assert.deepEqual(detailFromDisk.trades, saved.trades, "persisted reports retain continuous trade details");
+    assert.deepEqual(detailFromDisk.ledger, saved.ledger, "cold reports retain the simulator ledger");
     assert.deepEqual(detailFromDisk.unexecutedSignals, saved.unexecutedSignals, "cold reports retain unexecuted strategy signals");
     // Repeated reads are idempotent.
     const again = await (() => {

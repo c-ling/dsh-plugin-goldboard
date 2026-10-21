@@ -26,15 +26,28 @@ test("stage-zero documentation stays aligned with the released package version",
   assert.match(historical, /探索性诊断/);
 });
 
-test("baseline and stage-one documents are included in the package manifest", () => {
+test("baseline and staged implementation documents are included in the package manifest", () => {
   assert.ok(packageJson.files.includes("DESIGN.md"));
   assert.ok(packageJson.files.includes("docs/optimization-roadmap.md"));
   assert.ok(packageJson.files.includes("docs/stage-1-implementation-plan.md"));
+  assert.ok(packageJson.files.includes("docs/stage-2-implementation-plan.md"));
+  assert.ok(packageJson.files.includes("docs/stage-3-implementation-plan.md"));
+  assert.ok(packageJson.files.includes("docs/stage-4-implementation-plan.md"));
   assert.ok(packageJson.files.includes("docs/v1.11.0-strategy-optimization.md"));
 });
 
-test("stage-one domain and testing subpaths are explicit package exports", () => {
-  for (const subpath of ["./market-data", "./execution", "./history", "./replay", "./testing"]) {
+test("domain and testing subpaths are explicit package exports", () => {
+  for (const subpath of ["./market-data", "./execution", "./risk", "./ledger", "./history", "./replay", "./strategy", "./experiments", "./factors", "./testing"]) {
     assert.equal(typeof packageJson.exports[subpath]?.default, "string", `${subpath} has a default export target`);
   }
+});
+
+
+test("0.2.1 bundle manifest keeps the patch and client entry", () => {
+  assert.equal(packageJson.dsh?.client?.platform, "web");
+  assert.equal(packageJson.dsh?.bundle?.patch, "./cordis.patch.yml");
+  assert.equal(packageJson.exports["./cordis.patch.yml"]?.default, "./cordis.patch.yml");
+  assert.ok(packageJson.files.includes("cordis.patch.yml"));
+  assert.ok(packageJson.engines?.dsh?.includes(">=0.2.1"));
+  assert.equal(packageJson.dependencies, undefined);
 });

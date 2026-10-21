@@ -19,6 +19,9 @@ import {
   CALENDAR_VERSIONS,
   EXECUTION_MODEL_VERSION,
   MARKET_DATA_SCHEMA_VERSION,
+  RISK_CONFIG_VERSION,
+  SIGNAL_LEDGER_VERSION,
+  STATE_SCHEMA_VERSION,
   __setFetchImpl,
   apply,
 } from "../lib/testing.js";
@@ -32,36 +35,21 @@ function sinaLine(price) {
   return `var hq_str_gds_AU9999="${price},0,${price - 2},${price + 0.5},${price + 3},${price - 5},12:00:00,940.72,${price - 2},2282,301.00,1.00,${SESSION_DAY},沪金99";`;
 }
 
-function req(method, { url = "/", headers = {}, body = null } = {}) {
-  const chunks = body === null ? [] : [Buffer.from(typeof body === "string" ? body : JSON.stringify(body), "utf8")];
-  return {
-    method,
-    url,
-    headers,
-    async *[Symbol.asyncIterator]() {
-      yield* chunks;
-    },
-  };
-}
-
-function resCapture() {
-  return {
-    status: 0,
-    headers: null,
-    body: null,
-    writeHead(status, headers) {
-      this.status = status;
-      this.headers = headers;
-    },
-    end(body) {
-      this.body = body;
-    },
-  };
-}
-
 async function drain(ms = 30) {
   for (let i = 0; i < 25; i += 1) await new Promise((resolve) => setImmediate(resolve));
   if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function rmRetry(path) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      await rm(path, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error?.code !== "ENOTEMPTY" || attempt === 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
 }
 
 /** Freeze Date (+ optionally setInterval) at Beijing Friday 12:00, session open. */
@@ -73,124 +61,31 @@ function freezeSession(t, { intervals = false } = {}) {
 }
 
 /** Minimal SettingsProvider stand-in (same shape as the plan-04 suite fake). */
-function deepMerge(base, over) {
-  const out = Array.isArray(base) ? [...base] : { ...(base ?? {}) };
-  for (const [key, value] of Object.entries(over ?? {})) {
-    if (value !== null && typeof value === "object" && !Array.isArray(value)
-      && out[key] !== null && typeof out[key] === "object" && !Array.isArray(out[key])) {
-      out[key] = deepMerge(out[key], value);
-    } else {
-      out[key] = value;
-    }
-  }
-  return out;
-}
-
-function createFakeSettings({ writable = true } = {}) {
-  const namespaces = new Map();
-  const writeLog = [];
-  function stateOf(ns) {
-    if (!namespaces.has(ns)) namespaces.set(ns, { schema: null, options: {}, user: undefined, watchers: [] });
-    return namespaces.get(ns);
-  }
-  async function emit(ns) {
-    const state = stateOf(ns);
-    const next = readScope(ns).get();
-    for (const watcher of [...state.watchers]) await Promise.resolve().then(() => watcher(next, next));
-  }
-  function readScope(ns) {
-    const state = stateOf(ns);
-    return {
-      get() {
-        const base = state.schema ? state.schema(state.options.base ?? {}) : (state.options.base ?? {});
-        return state.user === undefined ? base : deepMerge(base, state.user);
-      },
-      watch(callback) {
-        state.watchers.push(callback);
-        return () => {
-          const index = state.watchers.indexOf(callback);
-          if (index >= 0) state.watchers.splice(index, 1);
-        };
-      },
-      async update(patch) {
-        writeLog.push({ kind: "update", ns, patch });
-        state.user = deepMerge(state.user ?? {}, patch);
-        await emit(ns);
-      },
-      async replace(section) {
-        writeLog.push({ kind: "replace", ns, section });
-        state.user = section;
-        await emit(ns);
-      },
-    };
-  }
-  return {
-    writable,
-    writes: writeLog,
-    register(ns, schema, options = {}) {
-      if (namespaces.has(ns) && namespaces.get(ns).schema) throw new Error(`duplicate namespace: ${ns}`);
-      const state = stateOf(ns);
-      state.schema = schema;
-      state.options = options;
-      return readScope(ns);
-    },
-    scopeOf: (ns) => readScope(ns),
-    get(ns) {
-      return namespaces.has(ns) ? readScope(ns).get() : undefined;
-    },
-    describe() {
-      return [...namespaces.entries()].map(([ns, state]) => ({
-        ns,
-        value: readScope(ns).get(),
-        ...(state.user === undefined ? {} : { user: state.user }),
-        revision: 1,
-        applies: "live",
-      }));
-    },
-    async update(ns, patch) {
-      return readScope(ns).update(patch);
-    },
-    async replace(ns, section) {
-      if (!writable) throw new Error("settings provider is read-only");
-      return readScope(ns).replace(section);
-    },
-  };
-}
-
 /**
  * Boot one plugin instance against a temp dir. Returns the runtime, collected
- * route handlers and an awaited dispose.
- *
- * options.settingsProvider mounts a fake ctx.inject(["settings"]) provider so
- * the settings branch runs; without it the classic config.json path applies.
+ * Fetch routes and an awaited dispose.
  */
 async function boot(options = {}) {
-  const dir = await mkdtemp(join(tmpdir(), "goldboard-int-"));
+  const dir = options.dir ?? await mkdtemp(join(tmpdir(), "goldboard-int-"));
   if (typeof options.prestore === "function") await options.prestore(dir);
   const routes = new Map();
   const disposers = [];
   const warnings = [];
-  const settings = options.settingsProvider ? createFakeSettings(options.settingsProvider) : null;
 
   const ctx = {
     logger: { warn: (line) => warnings.push(line), info: () => {} },
     llm: options.llm ?? undefined,
-    // dsh-settings' watch callbacks probe fiber state; any non-teardown
-    // value keeps them live (same trick as the plan-04 suite).
-    fiber: { state: 2 },
     effect: (fn) => {
       const dispose = fn();
       disposers.push(typeof dispose === "function" ? dispose : () => {});
       return () => typeof dispose === "function" && dispose();
     },
-    inject(deps, callback) {
-      if (deps.includes("settings") && !settings) return { dispose: () => {} };
-      Promise.resolve().then(() => callback({ settings, effect: ctx.effect }));
-      return { dispose: () => {} };
-    },
-    webServer: {
-      register(route) {
-        routes.set(route.path, route.handler);
+    connection: {
+      fetch: {
+        register(route) {
+          routes.set(route.path, route);
+          return async () => {};
+        },
       },
     },
   };
@@ -200,18 +95,31 @@ async function boot(options = {}) {
   await drain(80); // let init() + first tick settle
 
   async function call(path, method, reqOptions = {}) {
-    const handler = routes.get(path);
-    if (!handler) throw new Error(`no route registered: ${path}`);
-    const res = resCapture();
-    await handler(req(method, reqOptions), res);
-    return { status: res.status, body: res.body === null ? null : JSON.parse(res.body) };
+    const fullPath = path.startsWith("/api/") ? path : "/api" + path;
+    const route = routes.get(fullPath);
+    if (!route) throw new Error(`no route registered: ${fullPath}`);
+    const rawUrl = reqOptions.url ?? fullPath;
+    const url = new URL("http://local" + (rawUrl.startsWith("/api/") ? rawUrl : "/api" + rawUrl));
+    const headers = { ...(reqOptions.headers ?? {}) };
+    const init = { method, headers };
+    if (reqOptions.body !== null && reqOptions.body !== undefined) {
+      init.body = typeof reqOptions.body === "string" ? reqOptions.body : JSON.stringify(reqOptions.body);
+      if (!headers["content-type"]) headers["content-type"] = "application/json";
+    }
+    const response = await route.fetch(new Request(url, init));
+    const text = await response.text();
+    let body = null;
+    if (text !== "") {
+      try { body = JSON.parse(text); } catch { body = text; }
+    }
+    return { status: response.status, body, headers: response.headers };
   }
 
   const dispose = async () => {
     while (disposers.length) await disposers.shift()();
   };
 
-  return { dir, ctx, runtime, routes, warnings, call, dispose, settings };
+  return { dir, ctx, runtime, routes, warnings, call, dispose };
 }
 
 /** A scripted llm stub covering the AnalysisModule call surface. */
@@ -340,10 +248,17 @@ test("integration: /snapshot serves a cached payload for bursts and never persis
   const first = await h.call("/dsh-plugin-goldboard/snapshot", "GET", { headers: { "x-dsh-locale": "en" } });
   assert.equal(first.status, 200);
   assert.equal(first.body.ok, true);
-  for (const key of ["serverTime", "market", "quotes", "trend", "plan", "quality", "derived"]) {
+  for (const key of ["serverTime", "market", "quotes", "trend", "plan", "quality", "derived", "risk", "ledger"]) {
     assert.ok(key in first.body, `snapshot carries ${key}`);
   }
   assert.equal(h.runtime.localeHint, "en");
+
+  const ledgerBeforeRead = JSON.stringify(h.runtime.signalLedger);
+  const laneBeforeRead = JSON.stringify(h.runtime.laneState);
+  h.runtime.lastSnapshotBuiltAt = 0;
+  await h.call("/dsh-plugin-goldboard/snapshot", "GET");
+  assert.equal(JSON.stringify(h.runtime.signalLedger), ledgerBeforeRead, "stale snapshot GET does not advance the ledger");
+  assert.equal(JSON.stringify(h.runtime.laneState), laneBeforeRead, "stale snapshot GET does not advance lane state");
 
   const cached = await h.call("/dsh-plugin-goldboard/snapshot", "GET");
   assert.equal(cached.body.serverTime, first.body.serverTime, "2s cache window serves the same snapshot");
@@ -389,29 +304,154 @@ test("integration: POST /config deep-merges, honours clearSecrets and rejects un
   assert.equal(unknown.body.error.code, "UNKNOWN_CONFIG_KEY");
 });
 
-test("integration: with a writable settings provider POST /config writes through settings and archives legacy config.json", async (t) => {
+test("integration: POST /config fences revisions and rejects a stale save without writing", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  const h = await boot({ config: { fee: { sellPerGram: 4 } } });
+  t.after(() => h.dispose());
+
+  const first = await h.call("/dsh-plugin-goldboard/config", "GET");
+  assert.equal(first.status, 200);
+  assert.equal(first.body.revision, 0);
+
+  const saved = await h.call("/dsh-plugin-goldboard/config", "POST", {
+    body: { config: { fee: { sellPerGram: 9 } }, expectedRevision: 0 },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.config.fee.sellPerGram, 9);
+  assert.equal(saved.body.revision, 1);
+
+  const stale = await h.call("/dsh-plugin-goldboard/config", "POST", {
+    body: { config: { fee: { sellPerGram: 2 } }, expectedRevision: 0 },
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.body.error.code, "STALE_CONFIG");
+  assert.equal(stale.body.revision, 1);
+  assert.equal(stale.body.config.fee.sellPerGram, 9, "conflict response carries the current document");
+  const onDisk = JSON.parse(await readFile(join(h.dir, "config.json"), "utf8"));
+  assert.equal(onDisk.fee.sellPerGram, 9, "a stale save never writes");
+
+  const bad = await h.call("/dsh-plugin-goldboard/config", "POST", {
+    body: { config: { fee: { sellPerGram: 2 } }, expectedRevision: "zero" },
+  });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.error.code, "BAD_REVISION");
+});
+
+test("integration: reset clears the local position and risk ledger after confirmation", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  const h = await boot({ config: { position: { grams: 10, avgCostPerGram: 900 } } });
+  t.after(() => h.dispose());
+
+  const missing = await h.call("/dsh-plugin-goldboard/reset", "POST", { body: {} });
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.error.code, "CONFIRM_REQUIRED");
+
+  const reset = await h.call("/dsh-plugin-goldboard/reset", "POST", { body: { confirm: "reset" } });
+  assert.equal(reset.status, 200);
+  assert.equal(reset.body.ok, true);
+
+  const config = await h.call("/dsh-plugin-goldboard/config", "GET");
+  assert.equal(config.body.config.position.grams, 0);
+  const ledger = await h.call("/dsh-plugin-goldboard/ledger", "GET");
+  assert.equal(ledger.body.orders.length, 0);
+  assert.equal(ledger.body.decisions.length, 0);
+});
+
+test("integration: sidebar price preference round-trips through /config", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  const h = await boot({ config: {} });
+  t.after(() => h.dispose());
+  const saved = await h.call("/dsh-plugin-goldboard/config", "POST", {
+    body: { config: { sidebarPrice: "CMB" } },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.config.sidebarPrice, "CMB");
+  const read = await h.call("/dsh-plugin-goldboard/config", "GET");
+  assert.equal(read.body.config.sidebarPrice, "CMB");
+});
+
+test("integration: boot clears stale manual previous closes from an earlier Beijing day", async (t) => {
   freezeSession(t);
   const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
   t.after(() => __setFetchImpl(previousFetch));
   const h = await boot({
-    settingsProvider: { writable: true },
-    // A pre-upgrade config.json already on disk when the plugin boots.
     prestore: async (dir) => {
-      await writeFile(join(dir, "config.json"), JSON.stringify({ fee: { sellPerGram: 3 } }), "utf8");
+      await writeFile(join(dir, "config.json"), JSON.stringify({
+        manualPrevClose: { AU9999: 900, XAU: 4100, CMB: 880 },
+        manualPrevCloseDate: "2000-01-01",
+      }), "utf8");
     },
   });
   t.after(() => h.dispose());
-  await drain(60); // let the single-flight migration run
+  await drain(80);
+  assert.deepEqual(h.runtime.config.manualPrevClose, { AU9999: null, XAU: null, CMB: null });
+  assert.equal(h.runtime.config.manualPrevCloseDate, "");
+  const onDisk = JSON.parse(await readFile(join(h.dir, "config.json"), "utf8"));
+  assert.equal(onDisk.manualPrevCloseDate, "");
+  assert.equal(onDisk.manualPrevClose.CMB, null);
 
-  const patched = await h.call("/dsh-plugin-goldboard/config", "POST", {
-    body: { config: { fee: { sellPerGram: 9 } } },
+  const snapshot = await h.call("/dsh-plugin-goldboard/snapshot", "GET", { headers: { "x-dsh-locale": "en" } });
+  assert.deepEqual(snapshot.body.manualPrevClose, {});
+});
+
+test("integration: boot imports config.json.migrated once and lets config.json win afterwards", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  const h = await boot({
+    prestore: async (dir) => {
+      await writeFile(join(dir, "config.json.migrated"), JSON.stringify({ fee: { sellPerGram: 6 }, strategy: { confirmBars: 4 } }), "utf8");
+    },
   });
-  assert.equal(patched.status, 200);
-  assert.equal(patched.body.config.fee.sellPerGram, 9);
-  const replaces = h.settings.writes.filter((entry) => entry.kind === "replace");
-  assert.ok(replaces.length >= 1, "settings service received the namespace write");
-  assert.equal(existsSync(join(h.dir, "config.json")), false, "legacy config.json archived");
-  assert.equal(existsSync(join(h.dir, "config.json.migrated")), true, "archive kept for rollback");
+  t.after(() => h.dispose());
+  await drain(80);
+
+  assert.equal(h.runtime.config.fee.sellPerGram, 6, "migrated document is adopted");
+  assert.equal(h.runtime.config.strategy.confirmBars, 4, "migrated sections beyond defaults are retained");
+  assert.equal(existsSync(join(h.dir, "config.json")), true, "migrated document becomes the new config.json");
+  assert.equal(existsSync(join(h.dir, "config.json.migrated")), true, "legacy backup is kept");
+
+  const saved = await h.call("/dsh-plugin-goldboard/config", "POST", {
+    body: { config: { fee: { sellPerGram: 8 } } },
+  });
+  assert.equal(saved.status, 200);
+  await h.dispose();
+
+  const again = await boot({ dir: h.dir, config: { fee: { buyPerGram: 1 } } });
+  t.after(() => again.dispose());
+  await drain(80);
+  assert.equal(again.runtime.config.fee.sellPerGram, 8, "config.json survives a cold read");
+  assert.equal(again.runtime.config.fee.buyPerGram, 0, "the persisted document wins over entry config");
+});
+
+test("integration: system-settings route calls the fixed host helper and reports unsupported platforms", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("no network in test"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  let opened = 0;
+  const h = await boot({ config: { openSystemSettings: async () => { opened += 1; } } });
+  t.after(() => h.dispose());
+  const ok = await h.call("/dsh-plugin-goldboard/system-settings", "POST", { body: {} });
+  assert.equal(ok.status, 200);
+  assert.equal(opened, 1);
+
+  const failed = await boot({
+    config: {
+      openSystemSettings: async () => {
+        throw Object.assign(new Error("unsupported"), { code: "SYSTEM_UNSUPPORTED" });
+      },
+    },
+  });
+  t.after(() => failed.dispose());
+  const unsupported = await failed.call("/dsh-plugin-goldboard/system-settings", "POST", { body: {} });
+  assert.equal(unsupported.status, 501);
+  assert.equal(unsupported.body.error.code, "SYSTEM_UNSUPPORTED");
 });
 
 // ── 5. circuit breaker: healthy → failing source, stale degradation ─────────
@@ -723,13 +763,26 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   const h = await boot({ config: {} });
   t.after(() => h.dispose());
 
-  const started = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999" } });
+  const future = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", {
+    body: { days: 2, lane: "au9999", asOf: "2026-08-15T04:00:02.000Z" },
+  });
+  assert.equal(future.status, 400);
+  assert.equal(future.body.error.code, "REPLAY_AS_OF_IN_FUTURE");
+
+  const started = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", {
+    body: { days: 2, lane: "au9999", asOf: "2026-08-14T04:00:00.000Z" },
+  });
   assert.equal(started.status, 200);
   assert.equal(started.body.ok, true);
   assert.equal(started.body.cached, false);
   const report = started.body.report;
-  assert.equal(report.version, 5);
+  assert.equal(report.version, 6);
+  assert.equal(report.reportSchema, "goldboard-replay-report-v6");
+  assert.equal(report.reportSchemaVersion, 6);
+  assert.match(report.inputFingerprint, /^[a-f0-9]{64}$/);
+  assert.match(report.reportFingerprint, /^[a-f0-9]{64}$/);
   assert.match(report.reportId, /^replay-/);
+  assert.equal(report.asOf, "2026-08-14T04:00:00.000Z");
   assert.match(report.generatedAt, /^\d{4}-\d{2}-\d{2}T/);
   assert.equal(report.strategyId, "control");
   assert.equal(report.strategyVersion, "goldboard-control-v1");
@@ -739,7 +792,15 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(report.calendarVersion, CALENDAR_VERSIONS.SGE);
   assert.equal(report.evidenceStatus, "exploratory");
   assert.equal(report.validationGate.eligible, false);
-  assert.ok(report.validationGate.unmet.includes("no_oos_validation"));
+  assert.ok(report.validationGate.unmet.includes("multiple_oos_folds"));
+  assert.ok(report.validationGate.unmet.includes("verified_cost_semantics"));
+  assert.equal(report.dataset.lane, "au9999");
+  assert.match(report.dataset.datasetId, /^dataset-[a-f0-9]{64}$/);
+  assert.equal(report.simulation.simulatorVersion, "goldboard-replay-simulator-v1");
+  assert.equal(typeof report.metrics, "object");
+  assert.equal(typeof report.oos, "object");
+  assert.deepEqual(Object.keys(report.benchmarks), ["no_trade", "buy_and_hold", "fixed_interval_dca", "simple_moving_average"]);
+  assert.equal(typeof report.groups.executionEvidence, "object");
   assert.equal(report.lane, "au9999");
   assert.equal(report.fillPolicy, "next-bar-limit");
   assert.equal(report.ambiguityPolicy, "conservative-stop");
@@ -764,7 +825,7 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.equal(dayPulls.length, 4);
 
   // Same-window repeat → TTL cache; GET serves the same report idempotently.
-  const again = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999" } });
+  const again = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999", asOf: "2026-08-14T04:00:00.000Z" } });
   assert.equal(again.body.cached, true);
   assert.deepEqual(again.body.report, report);
   const fetched = await h.call("/dsh-plugin-goldboard/replay-stats", "GET", { url: "/dsh-plugin-goldboard/replay-stats?detail=true" });
@@ -773,15 +834,31 @@ test("integration: POST/GET /replay-stats serve a cached report with fetch-once 
   assert.deepEqual(fetched.body.report, report);
   assert.ok(Array.isArray(fetched.body.trades), "detail response includes simulated fills as trade-compatible rows");
   assert.ok(Array.isArray(fetched.body.orders), "detail response includes order lifecycle rows");
-  assert.ok(Array.isArray(fetched.body.fills), "detail response includes v5 fills");
+  assert.ok(Array.isArray(fetched.body.fills), "detail response includes simulated fills");
+  assert.ok(Array.isArray(fetched.body.ledger), "detail response includes the simulator ledger");
   assert.ok(Array.isArray(fetched.body.unexecutedSignals), "detail response includes unexecuted strategy signals");
 
-  // Report persisted next to state.json.
+  const listed = await h.call("/dsh-plugin-goldboard/replay-reports", "GET", {
+    url: "/dsh-plugin-goldboard/replay-reports?limit=10",
+  });
+  assert.equal(listed.status, 200);
+  assert.equal(listed.body.ok, true);
+  assert.equal(listed.body.reports[0].reportId, report.reportId);
+  const byId = await h.call("/dsh-plugin-goldboard/replay-stats", "GET", {
+    url: `/dsh-plugin-goldboard/replay-stats?detail=true&reportId=${encodeURIComponent(report.reportId)}`,
+  });
+  assert.deepEqual(byId.body.report, report);
+  assert.deepEqual(byId.body.ledger, fetched.body.ledger);
+
+  // Compatibility report persisted next to state.json; immutable v6 details
+  // also live under replay-reports/ and are addressable by reportId.
   const persisted = JSON.parse(await readFile(join(h.dir, "replay-stats.json"), "utf8"));
-  assert.equal(persisted.report.version, 5);
+  assert.equal(persisted.report.version, 6);
   assert.ok(Array.isArray(persisted.trades), "continuous fill-compatible details persist");
   assert.ok(Array.isArray(persisted.orders));
   assert.ok(Array.isArray(persisted.fills));
+  assert.ok(Array.isArray(persisted.events));
+  assert.ok(Array.isArray(persisted.ledger));
   assert.ok(Array.isArray(persisted.unexecutedSignals));
 });
 
@@ -797,14 +874,15 @@ test("integration: mid-window source failure surfaces as a partial report on the
 
   const h = await boot({ config: {} });
   t.after(() => h.dispose());
-  const result = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999" } });
+  const result = await h.call("/dsh-plugin-goldboard/replay-stats", "POST", { body: { days: 2, lane: "au9999", asOf: "2026-08-14T04:00:00.000Z" } });
   assert.equal(result.status, 200);
   assert.equal(result.body.ok, true);
   assert.equal(result.body.report.daysEvaluated, 1);
   assert.equal(result.body.report.daysFailed, 1);
   assert.deepEqual(result.body.report.failures, [{ day: "2026-08-13", error: "day-2 source down" }]);
   assert.equal(result.body.report.evidenceStatus, "exploratory");
-  assert.ok(result.body.report.validationGate.unmet.includes("incomplete_sessions"));
+  assert.equal(result.body.report.simulation.diagnostics.replayDayFailures, 1);
+  assert.ok(result.body.report.validationGate.unmet.includes("incomplete_sessions"), "source failures fail closed instead of disappearing from validation evidence");
 });
 
 // ── 10. long-term CMB point-in-time collection ──────────────────────────────
@@ -840,7 +918,7 @@ test("integration: a live CMB quote dual-writes state and append-only history", 
   assert.equal(records[0].customerAsk, 955.5);
   assert.equal(records[0].customerBid, 950.5);
   const state = JSON.parse(await readFile(join(h.dir, "state.json"), "utf8"));
-  assert.equal(state.stateSchemaVersion, 2);
+  assert.equal(state.stateSchemaVersion, STATE_SCHEMA_VERSION);
   assert.equal(state.dataSchemaVersion, "goldboard-market-data-v2");
 });
 
@@ -867,4 +945,197 @@ test("integration: dispose flushes pending bars state before resolving", async (
   assert.deepEqual(state.alertState, { probe: "pending" }, "dispose persisted the latest state");
   assert.equal(state.quotes.AU9999.price, 951.5, "dispose persisted the pending quote/bars state");
   assert.equal(state.barsSeedVersion, BARS_SEED_VERSION);
+});
+
+test("integration: unsupported v3 ledger state is normalized, persisted, and remains fail-closed", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("offline ledger recovery fixture"); });
+  t.after(() => __setFetchImpl(previousFetch));
+  const h = await boot({
+    config: { limits: { maxGrams: 100 } },
+    prestore: async (dir) => {
+      await writeFile(join(dir, "state.json"), JSON.stringify({
+        stateSchemaVersion: STATE_SCHEMA_VERSION,
+        quotes: {},
+        bars: {},
+        signalLedger: {
+          version: "future-ledger",
+          schemaVersion: 99,
+          orders: [{ orderId: "future-order", status: "pending", signalPrice: null, filledAt: null }],
+        },
+      }), "utf8");
+    },
+  });
+  await h.dispose();
+  const state = JSON.parse(await readFile(join(h.dir, "state.json"), "utf8"));
+  assert.equal(state.signalLedger.version, SIGNAL_LEDGER_VERSION);
+  assert.equal(state.signalLedger.integrity, "unsupported_version");
+  assert.equal(state.signalLedger.orders[0].signalPrice, null);
+  assert.equal(state.signalLedger.orders[0].filledAt, null);
+  assert.ok(h.warnings.some((line) => line.includes("signal ledger normalized")));
+  await rmRetry(h.dir);
+});
+
+test("integration: risk config, snapshot, ledger route, and state v3 stay aligned", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("offline stage2 fixture"); });
+  t.after(() => __setFetchImpl(previousFetch));
+
+  const h = await boot({
+    config: {
+      limits: { maxGrams: 100 },
+      risk: { mode: "fixed_grams", maxAmountCny: 100000, maxDailyLossCny: 500 },
+    },
+  });
+  t.after(async () => {
+    await h.dispose();
+    await rmRetry(h.dir);
+  });
+
+  const saved = await h.call("/dsh-plugin-goldboard/config", "POST", {
+    body: { config: { risk: { mode: "budget", maxRiskPerTradeCny: 250 } } },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.body.config.risk.version, RISK_CONFIG_VERSION);
+  assert.equal(saved.body.config.risk.mode, "budget");
+  assert.equal(saved.body.config.risk.maxRiskPerTradeCny, 250);
+  assert.equal(saved.body.config.risk.maxAmountCny, 100000, "partial risk patch keeps sibling limits");
+
+  const snapshot = await h.call("/dsh-plugin-goldboard/snapshot", "GET", { headers: { "x-dsh-locale": "en" } });
+  assert.equal(snapshot.status, 200);
+  assert.equal(snapshot.body.riskConfigVersion, RISK_CONFIG_VERSION);
+  assert.equal(snapshot.body.risk.mode, "budget");
+  assert.equal(snapshot.body.risk.gate.allowProtectiveExit, true);
+  assert.equal(snapshot.body.ledger.version, SIGNAL_LEDGER_VERSION);
+
+  const ledger = await h.call("/dsh-plugin-goldboard/ledger", "GET", { url: "/dsh-plugin-goldboard/ledger?limit=10" });
+  assert.equal(ledger.status, 200);
+  assert.equal(ledger.body.version, SIGNAL_LEDGER_VERSION);
+  assert.deepEqual(ledger.body.summary.counts, snapshot.body.ledger.counts);
+
+  await h.dispose();
+  const state = JSON.parse(await readFile(join(h.dir, "state.json"), "utf8"));
+  assert.equal(state.stateSchemaVersion, STATE_SCHEMA_VERSION);
+  assert.equal(state.signalLedger.version, SIGNAL_LEDGER_VERSION);
+});
+
+test("integration: strategy catalog is read-only and experiments default disabled", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("offline strategy fixture"); });
+  t.after(() => __setFetchImpl(previousFetch));
+
+  const h = await boot({ config: {} });
+  t.after(async () => {
+    await h.dispose();
+    await rmRetry(h.dir);
+  });
+
+  const catalog = await h.call("/dsh-plugin-goldboard/strategies", "GET");
+  assert.equal(catalog.status, 200);
+  assert.equal(catalog.body.ok, true);
+  assert.equal(catalog.body.config.enabled, false);
+  assert.deepEqual(catalog.body.strategies.map((entry) => entry.strategyId), ["control", "orb-trend-pullback"]);
+  const control = catalog.body.strategies.find((entry) => entry.strategyId === "control");
+  const candidate = catalog.body.strategies.find((entry) => entry.strategyId === "orb-trend-pullback");
+  assert.equal(control.live, true);
+  assert.equal(control.canDisable, false);
+  assert.equal(control.enabled, true);
+  assert.equal(candidate.live, false);
+  assert.equal(candidate.enabled, false);
+  assert.equal(typeof candidate.descriptorFingerprint, "string");
+  assert.equal("factory" in candidate, false);
+
+  const snapshot = await h.call("/dsh-plugin-goldboard/snapshot", "GET");
+  assert.equal(snapshot.body.plan.strategyId, "control");
+  assert.equal(snapshot.body.plan.signalSemantics, "state_condition");
+
+  const disabled = await h.call("/dsh-plugin-goldboard/strategy-experiments", "POST", {
+    body: { days: 1, mode: "diagnostic", strategyIds: ["orb-trend-pullback"], signalLanes: ["cmb"] },
+  });
+  assert.equal(disabled.status, 409);
+  assert.equal(disabled.body.error.code, "EXPERIMENTS_DISABLED");
+
+  const latest = await h.call("/dsh-plugin-goldboard/strategy-experiments", "GET");
+  assert.equal(latest.status, 200);
+  assert.equal(latest.body.report, null);
+});
+
+test("integration: enabled strategy experiment remains replay-only and survives a cold read", async (t) => {
+  freezeSession(t);
+  const previousFetch = __setFetchImpl(async () => { throw new Error("offline experiment fixture"); });
+  t.after(() => __setFetchImpl(previousFetch));
+
+  const h = await boot({
+    config: {
+      experiments: {
+        enabled: true,
+        enabledStrategyIds: ["control", "orb-trend-pullback"],
+        signalLanes: ["cmb"],
+        costMultipliers: [1],
+        parameterMultipliers: [1],
+        ablations: ["none"],
+      },
+    },
+  });
+  t.after(async () => {
+    await h.dispose();
+    await rmRetry(h.dir);
+  });
+
+  const before = await h.call("/dsh-plugin-goldboard/snapshot", "GET");
+  assert.equal(before.body.plan.strategyId, "control");
+  const run = await h.call("/dsh-plugin-goldboard/strategy-experiments", "POST", {
+    body: {
+      days: 1,
+      mode: "diagnostic",
+      strategyIds: ["control", "orb-trend-pullback"],
+      signalLanes: ["cmb"],
+    },
+  });
+  assert.equal(run.status, 200);
+  assert.equal(run.body.ok, true);
+  assert.equal(run.body.report.schema, "goldboard-strategy-experiment-v1");
+  assert.equal(run.body.report.scenarios.length, 2);
+  assert.equal(run.body.report.promotion.liveStrategyChanged, false);
+  assert.equal(run.body.report.promotion.eligible, false);
+  const candidateScenario = run.body.report.scenarios.find((entry) => entry.strategyId === "orb-trend-pullback");
+  assert.match(candidateScenario.factorFingerprint, /^[a-f0-9]{64}$/);
+
+  const latest = await h.call("/dsh-plugin-goldboard/strategy-experiments", "GET");
+  assert.deepEqual(latest.body.report, run.body.report);
+
+  for (const [body, code] of [
+    [{ days: "1", mode: "diagnostic", strategyIds: ["control"], signalLanes: ["cmb"] }, "BAD_EXPERIMENT_DAYS"],
+    [{ days: 1, mode: "diagnostic", strategyIds: "control", signalLanes: ["cmb"] }, "BAD_EXPERIMENT_STRATEGY_IDS"],
+    [{ days: 1, mode: "diagnostic", strategyIds: ["control"], signalLanes: ["cmb", 42] }, "BAD_EXPERIMENT_SIGNAL_LANES"],
+    [{}, "BAD_STRATEGY_EXPERIMENT_FIELDS"],
+    [[], "BAD_STRATEGY_EXPERIMENT_BODY"],
+    [1, "BAD_STRATEGY_EXPERIMENT_BODY"],
+    [{ days: 1, mode: "diagnostic", strategyIds: ["control"], signalLanes: ["cmb"], extra: true }, "BAD_STRATEGY_EXPERIMENT_FIELDS"],
+  ]) {
+    const malformed = await h.call("/dsh-plugin-goldboard/strategy-experiments", "POST", { body });
+    assert.equal(malformed.status, 400);
+    assert.equal(malformed.body.error.code, code);
+  }
+  const wrongType = await h.call("/dsh-plugin-goldboard/strategy-experiments", "POST", {
+    headers: { "content-type": "text/plain" }, body: "{}",
+  });
+  assert.equal(wrongType.status, 415);
+  assert.equal(wrongType.body.error.code, "UNSUPPORTED_MEDIA_TYPE");
+  const crossOrigin = await h.call("/dsh-plugin-goldboard/strategy-experiments", "POST", {
+    headers: { origin: "https://example.invalid", host: "127.0.0.1:3080" },
+    body: { days: 1, mode: "diagnostic", strategyIds: ["control"], signalLanes: ["cmb"] },
+  });
+  assert.equal(crossOrigin.status, 403);
+  assert.equal(crossOrigin.body.error.code, "BAD_REQUEST_ORIGIN");
+  const originWithoutHost = await h.call("/dsh-plugin-goldboard/strategy-experiments", "POST", {
+    headers: { origin: "http://127.0.0.1:3080" },
+    body: { days: 1, mode: "diagnostic", strategyIds: ["control"], signalLanes: ["cmb"] },
+  });
+  assert.equal(originWithoutHost.status, 403);
+  assert.equal(originWithoutHost.body.error.code, "BAD_REQUEST_ORIGIN");
+
+  const after = await h.call("/dsh-plugin-goldboard/snapshot", "GET");
+  assert.equal(after.body.plan.strategyId, "control");
+  assert.equal(h.runtime.config.experiments.enabled, true);
 });

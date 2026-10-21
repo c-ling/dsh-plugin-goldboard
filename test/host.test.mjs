@@ -1982,8 +1982,9 @@ test("client dictionaries keep zh/en key parity", () => {
     head: { appendChild() {} },
   };
   const requireStub = function (id) {
-    // plan-05: the factory now calls React.memo at module scope (Sparkline).
-    if (id === "react") return { createElement: function () {}, memo: (fn) => fn };
+    // The factory defines a local error boundary at module scope, so the stub
+    // needs a Component base in addition to createElement/memo.
+    if (id === "react") return { createElement: function () {}, memo: (fn) => fn, Component: class { constructor(props) { this.props = props; this.state = {}; } setState() {} } };
     throw new Error("unexpected require: " + id);
   };
   const clientExports = captured.factory(requireStub);
@@ -1994,6 +1995,7 @@ test("client dictionaries keep zh/en key parity", () => {
   const enKeys = Object.keys(clientExports.DICT.en).sort();
   assert.deepEqual(zhKeys, enKeys);
   assert.equal(clientExports.name, "dsh-plugin-goldboard");
+  assert.deepEqual(clientExports.inject, ["slots", "locale", "layout"]);
 
   const registrations = [];
   const slotsStub = {
@@ -2016,10 +2018,11 @@ test("client dictionaries keep zh/en key parity", () => {
     effect(fn) { fn(); return () => {}; },
   };
   clientExports.apply(ctxStub);
-  assert.deepEqual(registrations.map((entry) => entry.slot), ["shell.overlay", "settings.section"]);
-  assert.equal(registrations[0].registered.entry.id, "dsh-plugin-goldboard-board");
-  assert.equal(registrations[1].registered.entry.id, "dsh-plugin-goldboard");
-  assert.equal(registrations[1].registered.entry.order, 72);
+  assert.deepEqual(registrations.map((entry) => entry.slot), ["main", "sidebar.panellist"]);
+  assert.equal(registrations[0].registered.entry.key, "goldboard");
+  assert.equal(registrations[1].registered.entry.id, "goldboard");
+  assert.equal(registrations[1].registered.entry.order, 20);
+  assert.equal(typeof registrations[1].registered.entry.label, "function");
 });
 
 // ── plan-01 §01.1: 60m bucket aggregation + seed-version migration ─────────
