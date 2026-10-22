@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-goldboard",
-  "version": "1.15.0",
+  "version": "1.15.1",
   "description": "Gold dashboard and intraday decision support for DeepSeek Harness Web and Desktop: a sidebar Gold Board page with quotes, plan/risk panel, replay diagnostics, isolated strategy experiments, model analysis, data-source health and settings.",
   "type": "module",
   "main": "lib/index.js",

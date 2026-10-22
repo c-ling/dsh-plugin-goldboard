@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 // The client half is a browser bundle without module exports. The chart
-// helper block (formatBeijingTime … hasChartLine) is self-contained pure
-// code, so it is sliced out of the source text and evaluated directly.
+// helper block (formatBeijingTime … chartRuns) is self-contained pure code, so
+// it is sliced out of the source text and evaluated directly.
 // Temporary approach: plan-05 splits the client file into modules.
 const source = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
 
@@ -32,7 +32,8 @@ function loadChartHelpers() {
       chartBaselineBar,
       withChartBaseline,
       fillMissingChartSlots,
-      hasChartLine,
+      hasChartPoints,
+      chartRuns,
     };
   `)();
 }
@@ -90,7 +91,7 @@ test("filterTodayBars keeps yesterday-evening plus early-morning bars after midn
   }
 });
 
-test("filterTodayBars drops the previous trading day once the morning session opens", () => {
+test("filterTodayBars drops the previous trading day's evening once the morning session opens", () => {
   const serverTime = beijing("2026-08-14", "09:30");
   const bars = [
     ...minuteBars(beijing("2026-08-13", "21:00"), 5, 950),
@@ -98,8 +99,59 @@ test("filterTodayBars drops the previous trading day once the morning session op
     ...minuteBars(beijing("2026-08-14", "09:00"), 31, 952),
   ];
   const kept = h.filterTodayBars(bars, serverTime, HOURS);
-  assert.equal(kept.length, 31);
-  assert.ok(kept.every((bar) => bar.t >= beijing("2026-08-14", "09:00")));
+  // The current calendar day's own 00:00–02:00 tail stays (the
+  // compressed axis draws it in the leading slots); only the previous
+  // trading day's evening session is dropped.
+  assert.equal(kept.length, 31 + 5);
+  assert.ok(kept.every((bar) => bar.t >= beijing("2026-08-14", "00:00")), "yesterday's evening is gone");
+  assert.equal(kept.filter((bar) => bar.t < beijing("2026-08-14", "09:00")).length, 5, "tail kept");
+});
+
+test("filterTodayBars keeps the half-day tail drawn after 02:00 (regression: empty tail region)", () => {
+  // Reported symptom: 120 real 1m bars from 00:00–01:59 vanished from the
+  // 今日走势 chart once the clock passed 02:00, leaving a straight line drawn
+  // by the 昨收 anchor across the whole closed period.
+  const serverTime = beijing("2026-10-22", "10:40");
+  const tail = minuteBars(beijing("2026-10-22", "00:00"), 120, 891.3); // 00:00–01:59
+  const session = [
+    ...minuteBars(beijing("2026-10-22", "09:07"), 1, 887.82),
+    ...minuteBars(beijing("2026-10-22", "10:36"), 5, 888.5),
+  ];
+  const previousEvening = minuteBars(beijing("2026-10-21", "21:00"), 30, 890);
+  const kept = h.filterTodayBars([...previousEvening, ...tail, ...session], serverTime, HOURS);
+  assert.equal(kept.length, tail.length + session.length, "tail + session kept, yesterday evening dropped");
+  assert.equal(kept.filter((bar) => h.beijingMinutes(bar.t) < 120).length, 120, "all 120 tail bars survive at 10:40");
+  // The tail lands in the leading axis slots, so the chart draws them left of 09:00.
+  const tailIndices = tail.map((bar) => h.tradingMinuteIndex(h.beijingMinutes(bar.t), HOURS));
+  assert.deepEqual([tailIndices[0], tailIndices[tailIndices.length - 1]], [0, 119]);
+});
+
+test("chartRuns never joins the 昨收 anchor across the closed period", () => {
+  // Baseline at 00:00 (axis 0) + first real bar at 09:07 (axis 127).
+  const points = [{ index: 0, value: 891.37 }, { index: 127, value: 887.82 }];
+  const breakMode = h.chartRuns(points, false);
+  assert.equal(breakMode.runs.length, 0, "no polyline across the 9h closed gap");
+  assert.equal(breakMode.dots.length, 2, "both samples still render as dots");
+  // Connect mode is the explicit opt-in and still joins them.
+  assert.equal(h.chartRuns(points, true).runs.length, 1);
+});
+
+test("chartRuns breaks on gaps >5 slots but keeps a dense run and lone samples", () => {
+  const dense = [0, 1, 2, 3].map((index) => ({ index, value: 900 + index }));
+  const isolated = [200, 216, 217, 400].map((index) => ({ index, value: 890 }));
+  const result = h.chartRuns([...dense, ...isolated], false);
+  assert.deepEqual(result.runs.map((run) => run.length), [4, 2]);
+  assert.deepEqual(result.dots.map((dot) => dot.index), [200, 400]);
+});
+
+test("hasChartPoints accepts sparse days that chartRuns can still draw", () => {
+  const bars = [
+    { t: beijing("2026-10-22", "09:07"), c: 887.82 },
+    { t: beijing("2026-10-22", "09:23"), c: 886.91 },
+  ];
+  assert.equal(h.hasChartPoints(bars, HOURS), true);
+  assert.equal(h.hasChartPoints(bars.slice(0, 1), HOURS), false);
+  assert.equal(h.hasChartPoints([...bars, { t: beijing("2026-10-22", "02:30"), c: 887 }], HOURS), true, "closed-minute bar is ignored, not fatal");
 });
 
 test("fillMissingChartSlots keeps both sides of midnight on one axis", () => {

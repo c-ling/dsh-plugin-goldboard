@@ -17,7 +17,8 @@ DeepSeek Harness 黄金实时看板与策略诊断插件（Web 与 Desktop）：
 > v1.15.0 包含[阶段 2 风险闸门与订单生命周期](docs/stage-2-implementation-plan.md)：默认仍为 `fixed_grams`；可选 `budget` 模式、日/周/回撤与加仓闸门、stable setup/decision/order ID、state v3 和只读信号账本已实现。参考权益与 ledger 损益都只是本地风险估算，不是真实账户余额或流水。
 > v1.15.0 包含[阶段 3 ReplaySimulator 与长期验证框架](docs/stage-3-implementation-plan.md)：report v6 固定 as-of、dataset/input/report fingerprint，按月生成 6+1 walk-forward folds，并报告风险调整指标、Wilson/block-bootstrap 区间和四类同口径基准。实际历史不足 12 个月、真实双边覆盖不足或费用语义未核实时，Host 会强制保留 `exploratory`，不显示“已验证策略”。
 > v1.15.0 包含[阶段 4 策略实验层](docs/stage-4-implementation-plan.md)：正式策略契约/注册表、control adapter、ORB 趋势回调状态机、趋势/震荡/高波动标签、point-in-time 因子契约、隔离的策略/lane/消融/参数/成本矩阵和 fail-closed 晋级报告。实验默认关闭，live 始终固定 `control`；缺少 XAU+USDCNY 点时联合数据的场景明确为 unavailable，统计/ML/DRL 只登记未运行能力，不伪造训练结果。
-> v1.15.0 同时完成 **0.2.1 侧边栏页面重构**：移除右上角浮窗与 Settings 页面，改为 `sidebar.panellist` 入口 + `main` 独立页面；Host 路由迁移到 `/api/dsh-plugin-goldboard/...`，配置回到插件私有 `config.json`。安装命令统一 pin 到 `#v1.15.0`；`v1.14.0` 仅用于回退旧浮窗版本。
+> v1.15.0 同时完成 **0.2.1 侧边栏页面重构**：移除右上角浮窗与 Settings 页面，改为 `sidebar.panellist` 入口 + `main` 独立页面；Host 路由迁移到 `/api/dsh-plugin-goldboard/...`，配置回到插件私有 `config.json`。安装命令统一 pin 到 `#v1.15.1`；`v1.14.0` 仅用于回退旧浮窗版本。
+> v1.15.1 修复**今日走势图**：白盘不再丢弃当天 `00:00–02:00` 的分钟线（此前该区间只剩一条由昨收锚点连成的假折线），`>5 分钟断开`模式下孤立分钟改为圆点而不是被丢弃；跨零点时段（`昨晚 + 今晨`）行为不变。
 
 ## 安装
 
@@ -28,9 +29,9 @@ DeepSeek Harness 黄金实时看板与策略诊断插件（Web 与 Desktop）：
 ### Web（bundle，推荐）
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 # 或
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 `dsh plugin` 会把包加入 profile 的 `dsh.profile.bundles`，`cordis.patch.yml` 负责插入 loader 行；**不要再手写同一条 loader 行**。
@@ -41,7 +42,7 @@ npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboar
 
 ```sh
 "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
-  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 也可以退出 App 后，在 Plugins 页面安装本地路径或 GitHub tag。
@@ -50,7 +51,7 @@ npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboar
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 然后在 `~/.dsh/profiles/web/cordis.patch.yml` 增加：
@@ -121,10 +122,10 @@ curl -s 'http://127.0.0.1:<port>/api/dsh-plugin-goldboard/replay-reports'
 bundle 模式重新执行安装命令即可：
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 # 或 Desktop：
 "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
-  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 更新后重启宿主并硬刷新。手动模式需要重新 `corepack pnpm add`，loader 行保持不变。

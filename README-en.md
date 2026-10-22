@@ -17,7 +17,8 @@ A real-time gold dashboard and strategy-diagnostics plugin for DeepSeek Harness 
 > v1.15.0 includes [Stage 2 risk gates and order lifecycle](docs/stage-2-implementation-plan.md): the default remains `fixed_grams`; opt-in `budget` sizing, daily/weekly/drawdown and add gates, stable setup/decision/order IDs, state v3, and a read-only signal ledger are implemented. Reference equity and ledger P&L are local risk estimates, not a real account balance or statement.
 > v1.15.0 includes the [Stage 3 ReplaySimulator and long-term validation framework](docs/stage-3-implementation-plan.md): report v6 pins as-of and dataset/input/report fingerprints, builds monthly 6+1 walk-forward folds, and reports risk-adjusted metrics, Wilson/block-bootstrap intervals, and four same-basis benchmarks. The Host forces `exploratory` until at least 12 months of history, adequate real bid/ask coverage, verified cost semantics, and every OOS gate are actually present.
 > v1.15.0 includes the [Stage 4 strategy experiment layer](docs/stage-4-implementation-plan.md): a formal strategy contract/registry, a control adapter, an ORB trend-pullback state machine, trend/range/high-volatility labels, a point-in-time factor contract, isolated strategy/lane/ablation/parameter/cost matrices, and fail-closed promotion reports. Experiments are off by default and live remains fixed to `control`; XAU scenarios are unavailable without joint point-in-time XAU+USDCNY evidence, while statistical/ML/DRL capabilities remain explicitly unrun rather than fabricated results.
-> v1.15.0 also completes the **0.2.1 sidebar-page refactor**: the top-right floating board and Settings section are gone, replaced by a `sidebar.panellist` entry plus a `main` page. Host routes move to `/api/dsh-plugin-goldboard/...` and configuration returns to the plugin-private `config.json`. Install pins now point at `#v1.15.0`; `v1.14.0` is the old floating-window version for rollback only.
+> v1.15.0 also completes the **0.2.1 sidebar-page refactor**: the top-right floating board and Settings section are gone, replaced by a `sidebar.panellist` entry plus a `main` page. Host routes move to `/api/dsh-plugin-goldboard/...` and configuration returns to the plugin-private `config.json`. Install pins now point at `#v1.15.1`; `v1.14.0` is the old floating-window version for rollback only.
+> v1.15.1 fixes the **today-trend chart**: the daytime session no longer drops the current calendar day's `00:00–02:00` minute bars (that range used to hold nothing but a fake polyline drawn from the prev-close anchor), and lone samples in "break after 5 min" mode render as dots instead of being discarded. The cross-midnight behaviour ("last night + this morning") is unchanged.
 
 ## Install
 
@@ -28,9 +29,9 @@ Target runtime: **DeepSeek Harness 0.2.1+** (Web and Desktop). The package decla
 ### Web (bundle)
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 # or
-npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+npx @deepseek-ai/dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 `dsh plugin` adds the package to the profile's `dsh.profile.bundles`; `cordis.patch.yml` contributes the loader row. Do not also hand-write the same row.
@@ -41,7 +42,7 @@ Use the Desktop-bundled CLI (`--profile desktop` is managed by the Desktop app; 
 
 ```sh
 "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
-  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 You can also quit the app and install a local path or GitHub tag from the Plugins page.
@@ -50,7 +51,7 @@ You can also quit the app and install a local path or GitHub tag from the Plugin
 
 ```sh
 cd ~/.dsh/profiles/web
-corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+corepack pnpm add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 Then add to `~/.dsh/profiles/web/cordis.patch.yml`:
@@ -121,10 +122,10 @@ curl -s 'http://127.0.0.1:<port>/api/dsh-plugin-goldboard/replay-reports'
 Bundle mode: re-run the install command with the new pin.
 
 ```sh
-dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+dsh plugin --profile web add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 # Desktop:
 "/Applications/DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh" \
-  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.0"
+  plugin --profile desktop add "github:c-ling/dsh-plugin-goldboard#v1.15.1"
 ```
 
 Restart the host and hard-refresh. Manual mode requires re-running `corepack pnpm add`; the loader row stays unchanged.
